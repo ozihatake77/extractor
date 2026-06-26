@@ -1456,29 +1456,36 @@ def extract():
                 used_engine = 'qr_code (100%)'
                 lines = [f"QR: {k}={v}" for k, v in qr_data.items() if v]
             
-            # ═══ STRATEGY 2: Tesseract (fast, primary) ═══
+            # ═══ STRATEGY 2: Google Vision API (best accuracy) ═══
+            if (not parsed or not parsed.get('nik')) and VISION_API_KEY:
+                try:
+                    lines = extract_text_google_vision(tmp_path)
+                    used_engine = 'google_vision (95%)'
+                    parsed = parse_ktp(lines, img_path=tmp_path)
+                    if qr_data:
+                        for k, v in qr_data.items():
+                            if v and not parsed.get(k):
+                                parsed[k] = v
+                except Exception as e:
+                    pass
+            
+            # ═══ STRATEGY 3: Tesseract (fallback) ═══
             if not parsed or not parsed.get('nik'):
                 lines = extract_text_multi(tmp_path)
                 used_engine = 'tesseract'
-                
-                # Parse with existing parser
                 parsed_ocr = parse_ktp(lines, img_path=tmp_path)
-                
-                # Merge QR data with OCR data (QR takes priority)
                 if qr_data:
                     for k, v in qr_data.items():
                         if v and (not parsed_ocr.get(k) or k == 'nik'):
                             parsed_ocr[k] = v
-                
                 parsed = parsed_ocr
             
-            # ═══ STRATEGY 3: EasyOCR fallback (only if Tesseract failed) ═══
+            # ═══ STRATEGY 4: EasyOCR fallback (only if Tesseract failed) ═══
             if HAS_EASYOCR and (not parsed.get('nik') or len(re.sub(r'\D', '', parsed.get('nik', ''))) != 16):
                 try:
                     easyocr_lines = extract_text_easyocr(tmp_path)
                     if easyocr_lines:
                         easyocr_parsed = parse_ktp(easyocr_lines, img_path=tmp_path)
-                        # Merge: EasyOCR takes priority for missing/wrong fields
                         for k, v in easyocr_parsed.items():
                             if v and (not parsed.get(k) or (k == 'nik' and len(re.sub(r'\D', '', v)) == 16)):
                                 parsed[k] = v
