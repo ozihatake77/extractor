@@ -3,6 +3,7 @@ import re
 import json
 import tempfile
 import traceback
+from collections import OrderedDict
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import pytesseract
@@ -202,17 +203,30 @@ def find_value(text, keywords):
     return None
 
 def parse_ktp(lines):
-    """Smart KTP parser based on patterns"""
+    """Smart KTP parser — fields ordered exactly like physical KTP"""
     full_text = ' '.join(lines)
     full_upper = full_text.upper()
     
-    ktp = {
-        'provinsi': '', 'kabupaten': '', 'nik': '', 'nama': '',
-        'tempat_lahir': '', 'tanggal_lahir': '', 'jenis_kelamin': '',
-        'golongan_darah': '', 'alamat': '', 'rt_rw': '', 'kelurahan': '',
-        'kecamatan': '', 'agama': '', 'status_perkawinan': '',
-        'pekerjaan': '', 'kewarganegaraan': '', 'berlaku_hingga': ''
-    }
+    # OrderedDict: fields in EXACT KTP card order (top to bottom, left to right)
+    ktp = OrderedDict([
+        ('nik', ''),
+        ('nama', ''),
+        ('tempat_lahir', ''),
+        ('tanggal_lahir', ''),
+        ('jenis_kelamin', ''),
+        ('golongan_darah', ''),
+        ('alamat', ''),
+        ('rt_rw', ''),
+        ('kelurahan', ''),
+        ('kecamatan', ''),
+        ('kabupaten', ''),
+        ('provinsi', ''),
+        ('agama', ''),
+        ('status_perkawinan', ''),
+        ('pekerjaan', ''),
+        ('kewarganegaraan', ''),
+        ('berlaku_hingga', ''),
+    ])
     
     # === NIK: find 16 consecutive digits ===
     # Try multiple strategies with OCR error correction
@@ -315,34 +329,61 @@ def parse_ktp(lines):
         if any(kw in upper for kw in ['LAHIR', 'TEMPAT', 'TTL']):
             val = find_value(line, ['Tempat/Tgl Lahir', 'Tempat/TgiLahir', 'Tempat', 'Tgl Lahir', 'TgiLahir', 'TTL', 'Lahir'])
             if val:
-                # Fix OCR: "BEKaSI" → "BEKASI", "29 08 1998" → "29-08-1998"
+                # Fix OCR: "29 08 1998" → "29-08-1998"
                 val = val.replace('  ', '-')
-                # Try to split
-                date_match = re.search(r'(\d{1,2}[\-]\d{1,2}[\-]\d{4})', val)
+                # Try to find date pattern: DD-MM-YYYY or DD/MM/YYYY or DD MM YYYY
+                date_match = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', val)
                 if date_match:
-                    ktp['tanggal_lahir'] = date_match.group(1)
-                    # Fix OCR: validate year
-                    yr = int(ktp['tanggal_lahir'].split('-')[-1])
+                    day, month, year = date_match.group(1), date_match.group(2), date_match.group(3)
+                    ktp['tanggal_lahir'] = f"{day}-{month}-{year}"
+                    # Fix OCR year errors
+                    yr = int(year)
                     if yr < 1920 or yr > 2030:
-                        # Try to fix common OCR errors
                         yr_str = str(yr)
-                        yr_fixed = yr_str[:2] + yr_str[2:].replace('0', '9', 1) if len(yr_str) == 4 else yr_str
+                        # Try fixing: 199B → 1998, 200O → 2000
+                        yr_fixed = yr_str
+                        for ch, rep in [('O','0'),('o','0'),('l','1'),('I','1'),('S','5'),('B','8')]:
+                            yr_fixed = yr_fixed.replace(ch, rep)
                         try:
-                            yr_int = int(yr_fixed)
-                            if 1920 <= yr_int <= 2030:
-                                ktp['tanggal_lahir'] = ktp['tanggal_lahir'].replace(str(yr), yr_fixed)
+                            if 1920 <= int(yr_fixed) <= 2030:
+                                ktp['tanggal_lahir'] = f"{day}-{month}-{yr_fixed}"
                         except: pass
+                    # Extract tempat: everything before the date
                     tempat = val[:date_match.start()].strip().rstrip(',').strip()
                     if tempat and len(tempat) > 1:
-                        ktp['tempat_lahir'] = tempat.upper().title()
+                        ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
                 else:
+                    # Try "BEKASI, 29-08-1998" or "BEKASI,29 AGUSTUS 1998"
                     parts = val.split(',', 1)
                     if len(parts) == 2:
-                        ktp['tempat_lahir'] = parts[0].strip().title()
-                        ktp['tanggal_lahir'] = parts[1].strip().replace(' ', '-')
+                        tempat = parts[0].strip()
+                        tanggal = parts[1].strip()
+                        if tempat and len(tempat) > 1:
+                            ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
+                        # Try to extract date from the second part
+                        dm = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', tanggal)
+                        if dm:
+                            ktp['tanggal_lahir'] = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
+                        else:
+                            ktp['tanggal_lahir'] = tanggal.strip()
                     elif len(val) > 2:
-                        ktp['tempat_lahir'] = val.title()
+                        ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', val).strip().upper().title()
             break
+    
+    # === Fallback: Tempat/Tgl Lahir from line after NAMA ===
+    if not ktp['tempat_lahir'] and not ktp['tanggal_lahir']:
+        for i, line in enumerate(lines):
+            if 'NAMA' in line.upper() and i + 2 < len(lines):
+                # Check line 2 positions after NAMA (usually: NAMA → name → TTL)
+                ttl_line = lines[i + 2] if i + 2 < len(lines) else ''
+                if any(c.isdigit() for c in ttl_line) and any(kw in ttl_line.upper() for kw in ['LAHIR', 'BEKASI', 'JAKARTA', 'BANDUNG', 'SURABAYA']):
+                    dm = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', ttl_line)
+                    if dm:
+                        ktp['tanggal_lahir'] = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
+                        tempat = ttl_line[:dm.start()].strip().rstrip(',').strip()
+                        if tempat:
+                            ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
+                break
     
     # Fallback: find date pattern
     if not ktp['tanggal_lahir']:
