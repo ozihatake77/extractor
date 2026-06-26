@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install tesseract + Indonesian language pack
+# Install tesseract + Indonesian language pack + system deps for EasyOCR/PyTorch
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-ind \
@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,8 +17,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Pre-download EasyOCR models to avoid cold start
+RUN python3 -c "import easyocr; easyocr.Reader(['en','id'], gpu=False, verbose=False)" 2>/dev/null || true
+
+COPY . .*
 
 EXPOSE ${PORT:-5000}
 
-CMD gunicorn app:app --bind 0.0.0.0:${PORT:-5000} --timeout 120
+CMD gunicorn app:app --bind 0.0.0.0:${PORT:-5000} --timeout 180

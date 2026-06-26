@@ -15,6 +15,13 @@ try:
 except ImportError:
     HAS_VISION = False
 
+# OCR engines
+try:
+    import easyocr
+    HAS_EASYOCR = True
+except ImportError:
+    HAS_EASYOCR = False
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
@@ -115,6 +122,18 @@ def post_correct_ocr(text):
     }
     return text
 
+def extract_text_easyocr(img_path):
+    """Extract text using EasyOCR (deep learning — best for Indonesian text)"""
+    if not HAS_EASYOCR:
+        return []
+    try:
+        reader = easyocr.Reader(['en', 'id'], gpu=False, verbose=False)
+        results = reader.readtext(img_path)
+        lines = [text for _, text, conf in results if conf > 0.2]
+        return lines
+    except Exception:
+        return []
+
 def extract_text_multi(img_path):
     """Run multiple OCR passes and smart-merge results"""
     all_lines = []
@@ -211,7 +230,76 @@ def find_value(text, keywords):
                 return after
     return None
 
-def parse_ktp(lines):
+def extract_nik_from_image(img_path):
+    """Dedicated NIK extraction — run OCR with multiple modes, only parse NIK line"""
+    nik_candidates = []
+    
+    for mode in ['medium', 'soft', 'high_contrast', 'raw', 'denoise']:
+        try:
+            img = preprocess_image(img_path, mode)
+            text = pytesseract.image_to_string(img, config='--psm 6 --oem 3 -l ind+eng')
+            
+            # Find the NIK line specifically
+            for line in text.split('\n'):
+                upper = line.upper()
+                if 'NIK' not in upper:
+                    continue
+                
+                # Extract only the part AFTER "NIK" label
+                nik_idx = upper.find('NIK')
+                after_nik = line[nik_idx + 3:]  # Skip "NIK"
+                
+                # Fix common OCR misreads only on the digit part
+                raw = after_nik
+                for ch, rep in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2'),('D','0'),('J','1')]:
+                    raw = raw.replace(ch, rep)
+                
+                digits = re.sub(r'\D', '', raw)
+                
+                # 16 digits found directly
+                if len(digits) == 16:
+                    nik_candidates.append(digits)
+                    break
+                
+                # 17 digits — try removing each to find best 16-digit NIK
+                if len(digits) == 17:
+                    for remove_pos in range(8, 13):  # Middle positions most likely to have extra digit
+                        candidate = digits[:remove_pos] + digits[remove_pos+1:]
+                        nik_candidates.append(candidate)
+                    break
+                
+                # 14-15 digits — might be split, try from full text
+                if len(digits) >= 14:
+                    # Look for more digits nearby
+                    for other_line in text.split('\n'):
+                        if other_line == line:
+                            continue
+                        other_raw = other_line
+                        for ch, rep in [('O','0'),('o','0'),('l','1'),('I','1'),('|','1'),('S','5'),('B','8'),('D','0')]:
+                            other_raw = other_raw.replace(ch, rep)
+                        other_digits = re.sub(r'\D', '', other_raw)
+                        combined = digits + other_digits
+                        if len(combined) >= 16:
+                            nik_candidates.append(combined[:16])
+                            break
+                    break
+        except Exception:
+            pass
+    
+    if not nik_candidates:
+        return ''
+    
+    # Pick best candidate: prefer ones starting with valid province code
+    valid = [c for c in nik_candidates if 11 <= int(c[:2]) <= 99 and len(c) == 16]
+    if valid:
+        from collections import Counter
+        return Counter(valid).most_common(1)[0][0]
+    
+    # Fallback: return first candidate
+    return nik_candidates[0] if nik_candidates else ''
+
+
+def parse_ktp(lines, img_path=None):
     """Smart KTP parser — fields ordered exactly like physical KTP"""
     full_text = ' '.join(lines)
     full_upper = full_text.upper()
@@ -237,84 +325,34 @@ def parse_ktp(lines):
         ('berlaku_hingga', ''),
     ])
     
-    # === NIK: find 16 consecutive digits ===
-    # Try multiple strategies with OCR error correction
-    # Strategy 1: Direct 16 digits in full text
-    nik_match = re.search(r'\b(\d{16})\b', full_text.replace(' ', ''))
-    if nik_match:
-        ktp['nik'] = nik_match.group(1)
-    else:
-        # Strategy 2: Find NIK line and fix OCR misreads
-        for line in lines:
-            if 'NIK' in line.upper():
-                raw = line
-                for ch, replacement in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2')]:
-                    raw = raw.replace(ch, replacement)
-                digits = re.sub(r'\D', '', raw)
-                if len(digits) >= 16:
-                    ktp['nik'] = digits[:16]
+    # === NIK: first try from parsed lines (EasyOCR often correct), then Tesseract fallback ===
+    # Try from lines first
+    for i, line in enumerate(lines):
+        if 'NIK' in line.upper():
+            # Check if NIK is on the same line
+            after = line[line.upper().find('NIK') + 3:]
+            digits = re.sub(r'\D', '', after)
+            if len(digits) >= 16:
+                ktp['nik'] = digits[:16]
+                break
+            # Check next line (EasyOCR often puts NIK on separate line)
+            if i + 1 < len(lines):
+                next_digits = re.sub(r'\D', '', lines[i + 1])
+                if len(next_digits) >= 16:
+                    ktp['nik'] = next_digits[:16]
                     break
-        # Strategy 3: Look for 16-digit sequence with OCR fixes
-        if not ktp['nik']:
-            for line in lines:
-                raw = line
-                for ch, replacement in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5')]:
-                    raw = raw.replace(ch, replacement)
-                compact = raw.replace(' ', '')
-                match = re.search(r'\d{16}', compact)
-                if match:
-                    ktp['nik'] = match.group()
-                    break
-        # Strategy 4: Concat all digits and find valid NIK
-        if not ktp['nik']:
-            all_digits = ''
-            for line in lines:
-                raw = line
-                for ch, replacement in [('O','0'),('o','0'),('l','1'),('I','1'),('|','1')]:
-                    raw = raw.replace(ch, replacement)
-                all_digits += re.sub(r'\D', '', raw)
-            if len(all_digits) >= 16:
-                for i in range(len(all_digits) - 15):
-                    candidate = all_digits[i:i+16]
-                    if 11 <= int(candidate[:2]) <= 99:
-                        ktp['nik'] = candidate
-                        break
     
-    # === NIK Fallback: Re-run OCR with different preprocessing just for NIK ===
-    if not ktp['nik'] or len(re.sub(r'\D', '', ktp['nik'])) != 16:
-        # Try dedicated NIK extraction with multiple preprocessing modes
-        try:
-            nik_candidates = []
-            for mode in ['medium', 'soft', 'high_contrast', 'raw', 'denoise']:
-                img = preprocess_image(img_path, mode)
-                config = '--psm 6 --oem 3 -l ind+eng'
-                text = pytesseract.image_to_string(img, config=config)
-                # Fix common OCR misreads
-                for ch, rep in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2'),('D','0')]:
-                    text = text.replace(ch, rep)
-                # Find all digit sequences
-                all_digits = re.sub(r'\D', '', text)
-                # Try to find 16-digit NIK
-                for i in range(len(all_digits) - 15):
-                    candidate = all_digits[i:i+16]
-                    if 11 <= int(candidate[:2]) <= 99:
-                        nik_candidates.append(candidate)
-                # Also try 17-digit sequences (OCR sometimes adds extra digit)
-                for i in range(len(all_digits) - 16):
-                    candidate17 = all_digits[i:i+17]
-                    if 11 <= int(candidate17[:2]) <= 99:
-                        # Try removing each digit to find best 16-digit match
-                        for remove_pos in [8, 9, 10, 11, 12]:  # Middle positions are most likely to have extra digits
-                            candidate16 = candidate17[:remove_pos] + candidate17[remove_pos+1:]
-                            if 11 <= int(candidate16[:2]) <= 99:
-                                nik_candidates.append(candidate16)
-            # Pick most common candidate (voting)
-            if nik_candidates:
-                from collections import Counter
-                most_common = Counter(nik_candidates).most_common(1)[0][0]
-                ktp['nik'] = most_common
-        except Exception:
-            pass
+    # Fallback: Tesseract multi-pass if lines didn't have NIK
+    if not ktp['nik'] and img_path:
+        nik = extract_nik_from_image(img_path)
+        if nik:
+            ktp['nik'] = nik
+    
+    # Fallback: direct 16-digit match in full text
+    if not ktp['nik']:
+        nik_match = re.search(r'\b(\d{16})\b', full_text.replace(' ', ''))
+        if nik_match:
+            ktp['nik'] = nik_match.group(1)
     
     # === Provinsi ===
     for line in lines:
@@ -353,18 +391,24 @@ def parse_ktp(lines):
         if 'NAMA' in upper and 'NAMAKA' not in upper:
             val = find_value(line, ['Nama'])
             if val and len(val) > 2:
-                # Clean: only alpha + spaces
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
                 if len(val) > 2:
                     ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
             elif i + 1 < len(lines):
                 next_line = lines[i + 1].strip()
-                # Check next line isn't another field label
                 if not any(kw in next_line.upper() for kw in ['NIK', 'ALAMAT', 'LAHIR', 'AGAMA', 'KELAMIN']):
-                    val = re.sub(r'[^a-zA-Z\s]', '', next_line).strip()
+                    val = re.sub(r'[^a-zA-Z\\s]', '', next_line).strip()
                     if len(val) > 2:
                         ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
             break
+    # Fallback: EasyOCR puts name on separate line after "Nama"
+    if not ktp['nama']:
+        for i, line in enumerate(lines):
+            if line.upper().strip() == 'NAMA' and i + 1 < len(lines):
+                val = re.sub(r'[^a-zA-Z\s]', '', lines[i + 1]).strip()
+                if len(val) > 2:
+                    ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+                break
     
     # === Tempat/Tgl Lahir ===
     for line in lines:
@@ -379,31 +423,16 @@ def parse_ktp(lines):
                 if date_match:
                     day, month, year = date_match.group(1), date_match.group(2), date_match.group(3)
                     ktp['tanggal_lahir'] = f"{day}-{month}-{year}"
-                    # Fix OCR year errors
-                    yr = int(year)
-                    if yr < 1920 or yr > 2030:
-                        yr_str = str(yr)
-                        # Try fixing: 199B → 1998, 200O → 2000
-                        yr_fixed = yr_str
-                        for ch, rep in [('O','0'),('o','0'),('l','1'),('I','1'),('S','5'),('B','8')]:
-                            yr_fixed = yr_fixed.replace(ch, rep)
-                        try:
-                            if 1920 <= int(yr_fixed) <= 2030:
-                                ktp['tanggal_lahir'] = f"{day}-{month}-{yr_fixed}"
-                        except: pass
-                    # Extract tempat: everything before the date
                     tempat = val[:date_match.start()].strip().rstrip(',').strip()
                     if tempat and len(tempat) > 1:
                         ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
                 else:
-                    # Try "BEKASI, 29-08-1998" or "BEKASI,29 AGUSTUS 1998"
                     parts = val.split(',', 1)
                     if len(parts) == 2:
                         tempat = parts[0].strip()
                         tanggal = parts[1].strip()
                         if tempat and len(tempat) > 1:
                             ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
-                        # Try to extract date from the second part
                         dm = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', tanggal)
                         if dm:
                             ktp['tanggal_lahir'] = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
@@ -412,6 +441,21 @@ def parse_ktp(lines):
                     elif len(val) > 2:
                         ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', val).strip().upper().title()
             break
+    
+    # Fallback: EasyOCR puts TTL on separate lines
+    if not ktp['tempat_lahir'] and not ktp['tanggal_lahir']:
+        for i, line in enumerate(lines):
+            if line.upper().strip() in ['TEMPATTGL LAHIR', 'TEMPAT/TGL LAHIR', 'TEMPAT/TGILAHIR', 'TEMPAVTG LAHIR']:
+                # Next line has the actual value
+                if i + 1 < len(lines):
+                    val = lines[i + 1].strip()
+                    dm = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', val)
+                    if dm:
+                        ktp['tanggal_lahir'] = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
+                        tempat = val[:dm.start()].strip().rstrip(',').strip()
+                        if tempat:
+                            ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
+                break
     
     # === Fallback: Tempat/Tgl Lahir from line after NAMA ===
     if not ktp['tempat_lahir'] and not ktp['tanggal_lahir']:
@@ -760,14 +804,18 @@ def extract():
         tmp_path = tmp.name
     
     try:
-        # Choose OCR engine
+        # Choose OCR engine — EasyOCR preferred for accuracy
         if engine == 'google' and VISION_API_KEY:
             lines = extract_text_google_vision(tmp_path)
             used_engine = 'google_vision'
-        elif engine == 'google' and not VISION_API_KEY:
-            # Fallback to tesseract if no API key
-            lines = extract_text_multi(tmp_path)
-            used_engine = 'tesseract (no Google API key)'
+        elif HAS_EASYOCR:
+            # EasyOCR is most accurate for Indonesian text
+            lines = extract_text_easyocr(tmp_path)
+            used_engine = 'easyocr (AI)'
+            # Fallback to Tesseract if EasyOCR returns nothing
+            if not lines:
+                lines = extract_text_multi(tmp_path)
+                used_engine = 'tesseract (fallback)'
         else:
             lines = extract_text_multi(tmp_path)
             used_engine = 'tesseract'
@@ -775,7 +823,7 @@ def extract():
         if doc_type == 'kk':
             parsed = parse_kk(lines)
         else:
-            parsed = parse_ktp(lines)
+            parsed = parse_ktp(lines, img_path=tmp_path)
         
         return jsonify({
             'success': True,
