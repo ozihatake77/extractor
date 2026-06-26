@@ -17,6 +17,7 @@ except ImportError:
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.json.sort_keys = False  # Preserve OrderedDict insertion order
 
 # Google Vision API key (set via env var)
 VISION_API_KEY = os.environ.get('GOOGLE_VISION_API_KEY', '')
@@ -230,15 +231,14 @@ def parse_ktp(lines):
     
     # === NIK: find 16 consecutive digits ===
     # Try multiple strategies with OCR error correction
-    # 1. Direct 16 digits in full text
+    # Strategy 1: Direct 16 digits in full text
     nik_match = re.search(r'\b(\d{16})\b', full_text.replace(' ', ''))
     if nik_match:
         ktp['nik'] = nik_match.group(1)
     else:
-        # 2. NIK might be split across text or have OCR errors
+        # Strategy 2: Find NIK line and fix OCR misreads
         for line in lines:
             if 'NIK' in line.upper():
-                # Fix common OCR misreads in digit context
                 raw = line
                 for ch, replacement in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2')]:
                     raw = raw.replace(ch, replacement)
@@ -246,7 +246,7 @@ def parse_ktp(lines):
                 if len(digits) >= 16:
                     ktp['nik'] = digits[:16]
                     break
-        # 3. Look for any 16-digit sequence with possible OCR errors
+        # Strategy 3: Look for 16-digit sequence with OCR fixes
         if not ktp['nik']:
             for line in lines:
                 raw = line
@@ -257,7 +257,7 @@ def parse_ktp(lines):
                 if match:
                     ktp['nik'] = match.group()
                     break
-        # 4. Last resort: concat all digits from all lines that look like NIK region codes
+        # Strategy 4: Concat all digits and find valid NIK
         if not ktp['nik']:
             all_digits = ''
             for line in lines:
@@ -266,12 +266,35 @@ def parse_ktp(lines):
                     raw = raw.replace(ch, replacement)
                 all_digits += re.sub(r'\D', '', raw)
             if len(all_digits) >= 16:
-                # Indonesian NIK starts with province code (11-99)
                 for i in range(len(all_digits) - 15):
                     candidate = all_digits[i:i+16]
                     if 11 <= int(candidate[:2]) <= 99:
                         ktp['nik'] = candidate
                         break
+    
+    # === NIK Fallback: Re-run OCR with different preprocessing just for NIK ===
+    if not ktp['nik'] or len(re.sub(r'\D', '', ktp['nik'])) < 16:
+        # Try dedicated NIK extraction with softer preprocessing
+        try:
+            nik_candidates = []
+            for mode in ['soft', 'medium', 'raw', 'denoise']:
+                img = preprocess_image(img_path, mode)
+                config = '--psm 6 --oem 3 -l ind+eng'
+                text = pytesseract.image_to_string(img, config=config)
+                # Look for 16-digit sequences
+                for ch, rep in [('O','0'),('o','0'),('l','1'),('I','1'),('|','1'),('S','5'),('B','8')]:
+                    text = text.replace(ch, rep)
+                for m in re.finditer(r'\d{16}', text.replace(' ', '')):
+                    candidate = m.group()
+                    if 11 <= int(candidate[:2]) <= 99:
+                        nik_candidates.append(candidate)
+            # Pick most common candidate or first valid one
+            if nik_candidates:
+                from collections import Counter
+                most_common = Counter(nik_candidates).most_common(1)[0][0]
+                ktp['nik'] = most_common
+        except Exception:
+            pass
     
     # === Provinsi ===
     for line in lines:
@@ -374,7 +397,6 @@ def parse_ktp(lines):
     if not ktp['tempat_lahir'] and not ktp['tanggal_lahir']:
         for i, line in enumerate(lines):
             if 'NAMA' in line.upper() and i + 2 < len(lines):
-                # Check line 2 positions after NAMA (usually: NAMA → name → TTL)
                 ttl_line = lines[i + 2] if i + 2 < len(lines) else ''
                 if any(c.isdigit() for c in ttl_line) and any(kw in ttl_line.upper() for kw in ['LAHIR', 'BEKASI', 'JAKARTA', 'BANDUNG', 'SURABAYA']):
                     dm = re.search(r'(\d{1,2})[\s\-/.]+(\d{1,2})[\s\-/.]+(\d{4})', ttl_line)
@@ -383,6 +405,22 @@ def parse_ktp(lines):
                         tempat = ttl_line[:dm.start()].strip().rstrip(',').strip()
                         if tempat:
                             ktp['tempat_lahir'] = re.sub(r'[^a-zA-Z\s.]', '', tempat).strip().upper().title()
+                break
+    
+    # === Fallback: Tempat Lahir from known Indonesian cities ===
+    if not ktp['tempat_lahir']:
+        known_cities = ['BEKASI', 'JAKARTA', 'BANDUNG', 'SURABAYA', 'SEMARANG', 'YOGYAKARTA',
+                        'MALANG', 'MEDAN', 'MAKASSAR', 'DENPASAR', 'BOGOR', 'TANGERANG',
+                        'DEPOK', 'SOLO', 'BALIKPAPAN', 'MANADO', 'PALEMBANG', 'PADANG',
+                        'PEKANBARU', 'BATAM', 'LAMPUNG', 'CIREBON', 'TEGAL', 'PURWOKERTO',
+                        'MADIUN', 'KEDIRI', 'BLITAR', 'PROBOLINGGO', 'PASURUAN', 'MOJOKERTO',
+                        'SIDOARJO', 'GRESIK', 'TUBAN', 'LAMONGAN', 'JOMBANG', 'NGANJUK',
+                        'KEDIRI', 'TULUNGAGUNG', 'TRENGGALEK', 'PONOROGO', 'MAGETAN',
+                        'NGAWI', 'BOJONEGORO', 'JEMBER', 'BANYUWANGI', 'SITUBONDO',
+                        'BONDOWOSO', 'LUMAJANG', 'PROBOLINGGO', 'MALANG', 'BATU']
+        for city in known_cities:
+            if city in full_upper:
+                ktp['tempat_lahir'] = city.title()
                 break
     
     # Fallback: find date pattern
