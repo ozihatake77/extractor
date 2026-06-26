@@ -38,7 +38,8 @@ function setDocType(type) {
 
 // Camera button
 btnCamera.addEventListener('click', (e) => {
-    e.stopPropagation();
+    e.preventDefault();
+    fileCamera.value = '';
     fileCamera.click();
 });
 fileCamera.addEventListener('change', (e) => {
@@ -47,7 +48,8 @@ fileCamera.addEventListener('change', (e) => {
 
 // Gallery button
 btnGallery.addEventListener('click', (e) => {
-    e.stopPropagation();
+    e.preventDefault();
+    fileGallery.value = '';
     fileGallery.click();
 });
 fileGallery.addEventListener('change', (e) => {
