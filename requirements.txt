@@ -1,4 +1,8 @@
 flask==3.1.1
 gunicorn==23.0.0
 Pillow==11.2.1
-pytesseract==0.3.13
+easyocr==1.7.2
+numpy>=1.24.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python-headless>=4.8.0
