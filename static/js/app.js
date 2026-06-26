@@ -150,7 +150,14 @@ function displayResult(data) {
 // Copy
 btnCopy.addEventListener('click', async () => {
     if (!lastResult) return;
-    const text = JSON.stringify(lastResult.parsed, null, 2);
+    // Format as readable key-value pairs
+    const lines = [];
+    for (const [key, value] of Object.entries(lastResult.parsed)) {
+        if (key === 'anggota_keluarga') continue;
+        const label = fieldLabels[key] || key;
+        if (value && value !== '-') lines.push(`${label}: ${value}`);
+    }
+    const text = lines.join('\n');
     try {
         await navigator.clipboard.writeText(text);
         showToast('Berhasil dicopy!');

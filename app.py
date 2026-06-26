@@ -115,7 +115,7 @@ def extract_text_multi(img_path):
                 if key not in seen and len(key) > 1:
                     seen.add(key)
                     all_lines.append(line)
-        except:
+        except Exception:
             pass
     
     # Sort by typical KTP field order (top to bottom)
@@ -549,10 +549,23 @@ def extract():
     
     file = request.files['file']
     doc_type = request.form.get('type', 'ktp')
-    engine = request.form.get('engine', 'tesseract')  # 'tesseract' or 'google'
+    engine = request.form.get('engine', 'tesseract')
     
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
+    
+    # Server-side file validation
+    allowed_types = {'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'}
+    if file.content_type and file.content_type not in allowed_types:
+        return jsonify({'error': f'Format tidak didukung: {file.content_type}. Gunakan JPG/PNG/WebP.'}), 400
+    
+    # Validate doc_type
+    if doc_type not in ('ktp', 'kk'):
+        return jsonify({'error': 'Tipe dokumen tidak valid'}), 400
+    
+    # Validate engine
+    if engine not in ('tesseract', 'google'):
+        engine = 'tesseract'
     
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
         file.save(tmp.name)
@@ -602,4 +615,4 @@ def status():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('DEBUG', '').lower() == 'true')
