@@ -17,7 +17,15 @@ except ImportError:
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-app.json.sort_keys = False  # Preserve OrderedDict insertion order
+
+# Preserve OrderedDict insertion order in JSON responses
+from flask.json.provider import DefaultJSONProvider
+class OrderedJSONProvider(DefaultJSONProvider):
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault('sort_keys', False)
+        return super().dumps(obj, **kwargs)
+app.json_provider_class = OrderedJSONProvider
+app.json = OrderedJSONProvider(app)
 
 # Google Vision API key (set via env var)
 VISION_API_KEY = os.environ.get('GOOGLE_VISION_API_KEY', '')
@@ -273,22 +281,34 @@ def parse_ktp(lines):
                         break
     
     # === NIK Fallback: Re-run OCR with different preprocessing just for NIK ===
-    if not ktp['nik'] or len(re.sub(r'\D', '', ktp['nik'])) < 16:
-        # Try dedicated NIK extraction with softer preprocessing
+    if not ktp['nik'] or len(re.sub(r'\D', '', ktp['nik'])) != 16:
+        # Try dedicated NIK extraction with multiple preprocessing modes
         try:
             nik_candidates = []
-            for mode in ['soft', 'medium', 'raw', 'denoise']:
+            for mode in ['medium', 'soft', 'high_contrast', 'raw', 'denoise']:
                 img = preprocess_image(img_path, mode)
                 config = '--psm 6 --oem 3 -l ind+eng'
                 text = pytesseract.image_to_string(img, config=config)
-                # Look for 16-digit sequences
-                for ch, rep in [('O','0'),('o','0'),('l','1'),('I','1'),('|','1'),('S','5'),('B','8')]:
+                # Fix common OCR misreads
+                for ch, rep in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2'),('D','0')]:
                     text = text.replace(ch, rep)
-                for m in re.finditer(r'\d{16}', text.replace(' ', '')):
-                    candidate = m.group()
+                # Find all digit sequences
+                all_digits = re.sub(r'\D', '', text)
+                # Try to find 16-digit NIK
+                for i in range(len(all_digits) - 15):
+                    candidate = all_digits[i:i+16]
                     if 11 <= int(candidate[:2]) <= 99:
                         nik_candidates.append(candidate)
-            # Pick most common candidate or first valid one
+                # Also try 17-digit sequences (OCR sometimes adds extra digit)
+                for i in range(len(all_digits) - 16):
+                    candidate17 = all_digits[i:i+17]
+                    if 11 <= int(candidate17[:2]) <= 99:
+                        # Try removing each digit to find best 16-digit match
+                        for remove_pos in [8, 9, 10, 11, 12]:  # Middle positions are most likely to have extra digits
+                            candidate16 = candidate17[:remove_pos] + candidate17[remove_pos+1:]
+                            if 11 <= int(candidate16[:2]) <= 99:
+                                nik_candidates.append(candidate16)
+            # Pick most common candidate (voting)
             if nik_candidates:
                 from collections import Counter
                 most_common = Counter(nik_candidates).most_common(1)[0][0]
