@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Install tesseract + Indonesian language pack + system deps for EasyOCR/PyTorch
-RUN apt-get update && apt-get install -y \
+# Install tesseract + system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-ind \
     tesseract-ocr-eng \
@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libgl1-mesa-glx \
+    libgl1 \
+    libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,10 +18,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download EasyOCR models to avoid cold start
+# Pre-download EasyOCR models
 RUN python3 -c "import easyocr; easyocr.Reader(['en','id'], gpu=False, verbose=False)" 2>/dev/null || true
 
-COPY . .*
+COPY . .
 
 EXPOSE ${PORT:-5000}
 
