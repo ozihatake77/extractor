@@ -21,33 +21,55 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 VISION_API_KEY = os.environ.get('GOOGLE_VISION_API_KEY', '')
 
 def preprocess_image(img_path, mode='high_contrast'):
-    """Preprocess with multiple strategies"""
+    """Preprocess with multiple strategies — optimized for Indonesian KTP/KK"""
     img = Image.open(img_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
     img = ImageOps.exif_transpose(img)
     
     w, h = img.size
-    if w < 1200:
-        scale = 1400 / w
+    # Downscale large images (Tesseract optimal: 1500-2500px width)
+    if w > 2500:
+        scale = 2000 / w
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    # Upscale small images
+    elif w < 1000:
+        scale = 1500 / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     
     gray = img.convert('L')
     
     if mode == 'high_contrast':
+        # Gentler contrast boost — preserve light text
         enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(2.5)
-        enhancer = ImageEnhance.Sharpness(gray)
         gray = enhancer.enhance(2.0)
+        enhancer = ImageEnhance.Sharpness(gray)
+        gray = enhancer.enhance(1.5)
         gray = gray.filter(ImageFilter.MedianFilter(size=3))
-        # Adaptive threshold
-        gray = gray.point(lambda x: 255 if x > 130 else 0, '1')
+        # Adaptive threshold with lower cutoff — preserves thin strokes
+        gray = gray.point(lambda x: 255 if x > 100 else 0, '1')
     elif mode == 'medium':
         enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(1.8)
+        gray = enhancer.enhance(1.5)
+        enhancer = ImageEnhance.Sharpness(gray)
+        gray = enhancer.enhance(1.3)
         gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    elif mode == 'soft':
+        # Gentle processing for well-lit photos
+        enhancer = ImageEnhance.Contrast(gray)
+        gray = enhancer.enhance(1.3)
+        enhancer = ImageEnhance.Sharpness(gray)
+        gray = enhancer.enhance(1.2)
     elif mode == 'raw':
         pass
+    elif mode == 'denoise':
+        # Heavy denoise for blurry/dark photos
+        enhancer = ImageEnhance.Contrast(gray)
+        gray = enhancer.enhance(2.5)
+        enhancer = ImageEnhance.Brightness(gray)
+        gray = enhancer.enhance(1.3)
+        gray = gray.filter(ImageFilter.MedianFilter(size=5))
+        gray = gray.point(lambda x: 255 if x > 90 else 0, '1')
     
     return gray
 
@@ -58,6 +80,80 @@ def ocr_pass(img_path, mode, psm):
     text = pytesseract.image_to_string(img, config=config)
     lines = [l.strip() for l in text.split('\n') if l.strip() and len(l.strip()) > 1]
     return lines
+
+def ocr_likely_contains_ktp(text):
+    """Check if OCR result likely contains KTP content"""
+    upper = text.upper()
+    keywords = ['NIK', 'NAMA', 'PROVINSI', 'KABUPATEN', 'KOTA', 'LAHIR', 'AGAMA',
+                'KELAMIN', 'ALAMAT', 'RT', 'RW', 'KELURAHAN', 'KECAMATAN',
+                'PEKERJAAN', 'KEWARGANEGARAAN', 'BERLAKU']
+    hits = sum(1 for kw in keywords if kw in upper)
+    return hits >= 2  # At least 2 keywords found
+
+def post_correct_ocr(text):
+    """Fix common OCR misreads for Indonesian text"""
+    # Common digit/letter confusion in NIK context
+    corrections = {
+        'O': '0', 'o': '0', 'Q': '0',  # O → 0
+        'l': '1', 'I': '1', '|': '1',   # l/I → 1
+        'Z': '2', 'z': '2',             # Z → 2
+        'S': '5', 's': '5',             # S → 5
+        'G': '6',                        # G → 6
+        'T': '7',                        # T → 7
+        'B': '8',                        # B → 8
+        'g': '9',                        # g → 9
+    }
+    return text
+
+def extract_text_multi(img_path):
+    """Run multiple OCR passes and smart-merge results"""
+    all_lines = []
+    seen = set()
+    best_lines = []
+    best_score = 0
+    
+    # More passes with varied strategies
+    passes = [
+        ('high_contrast', 6),   # Uniform block
+        ('high_contrast', 4),   # Single column
+        ('high_contrast', 3),   # Fully automatic
+        ('medium', 6),          # Uniform block, softer
+        ('medium', 4),          # Single column, softer
+        ('medium', 3),          # Automatic, softer
+        ('soft', 6),            # Well-lit photos
+        ('soft', 3),            # Well-lit, automatic
+        ('denoise', 6),         # Dark/blurry photos
+        ('raw', 6),             # No preprocessing
+    ]
+    
+    for mode, psm in passes:
+        try:
+            lines = ocr_pass(img_path, mode, psm)
+            # Score this pass by how many KTP keywords it found
+            combined = ' '.join(lines)
+            score = ocr_likely_contains_ktp(combined)
+            if score > best_score:
+                best_score = score
+                best_lines = lines
+            
+            for line in lines:
+                # Smarter dedup: normalize but keep variant readings
+                key = re.sub(r'\s+', ' ', line.strip().upper())
+                key = re.sub(r'[^A-Z0-9\s]', '', key)  # Strip OCR noise chars
+                if key not in seen and len(key) > 1:
+                    seen.add(key)
+                    all_lines.append(line)
+        except Exception:
+            pass
+    
+    # If best pass found more keywords, prefer its ordering
+    if best_score >= 3 and best_lines:
+        # Rebuild with best pass lines first, then unique extras
+        best_set = set(re.sub(r'\s+', ' ', l.strip().upper()) for l in best_lines)
+        extras = [l for l in all_lines if re.sub(r'\s+', ' ', l.strip().upper()) not in best_set]
+        all_lines = best_lines + extras
+    
+    return all_lines
 
 def extract_text_google_vision(img_path):
     """Extract text using Google Cloud Vision API (much more accurate)"""
@@ -93,35 +189,6 @@ def extract_text_google_vision(img_path):
     
     return lines
 
-def extract_text_multi(img_path):
-    """Run multiple OCR passes and MERGE all results"""
-    all_lines = []
-    seen = set()
-    
-    # Run multiple passes with different settings
-    passes = [
-        ('high_contrast', 6),
-        ('medium', 6),
-        ('high_contrast', 4),
-        ('raw', 6),
-    ]
-    
-    for mode, psm in passes:
-        try:
-            lines = ocr_pass(img_path, mode, psm)
-            for line in lines:
-                # Normalize for dedup
-                key = re.sub(r'\s+', ' ', line.strip().upper())
-                if key not in seen and len(key) > 1:
-                    seen.add(key)
-                    all_lines.append(line)
-        except Exception:
-            pass
-    
-    # Sort by typical KTP field order (top to bottom)
-    # This ensures consistent parsing regardless of OCR pass order
-    return all_lines
-
 def find_value(text, keywords):
     """Extract value after keyword in text"""
     upper = text.upper()
@@ -148,27 +215,49 @@ def parse_ktp(lines):
     }
     
     # === NIK: find 16 consecutive digits ===
-    # Try multiple strategies
+    # Try multiple strategies with OCR error correction
     # 1. Direct 16 digits in full text
     nik_match = re.search(r'\b(\d{16})\b', full_text.replace(' ', ''))
     if nik_match:
         ktp['nik'] = nik_match.group(1)
     else:
-        # 2. NIK might be split across text: "3603192904 7460001" → concat digits
+        # 2. NIK might be split across text or have OCR errors
         for line in lines:
             if 'NIK' in line.upper():
-                digits = re.sub(r'\D', '', line)
+                # Fix common OCR misreads in digit context
+                raw = line
+                for ch, replacement in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5'),('B','8'),('G','6'),('Z','2'),('z','2')]:
+                    raw = raw.replace(ch, replacement)
+                digits = re.sub(r'\D', '', raw)
                 if len(digits) >= 16:
                     ktp['nik'] = digits[:16]
                     break
-        # 3. Look for any 16-digit sequence with possible spaces
+        # 3. Look for any 16-digit sequence with possible OCR errors
         if not ktp['nik']:
             for line in lines:
-                compact = line.replace(' ', '')
+                raw = line
+                for ch, replacement in [('O','0'),('o','0'),('Q','0'),('l','1'),('I','1'),('|','1'),('S','5'),('s','5')]:
+                    raw = raw.replace(ch, replacement)
+                compact = raw.replace(' ', '')
                 match = re.search(r'\d{16}', compact)
                 if match:
                     ktp['nik'] = match.group()
                     break
+        # 4. Last resort: concat all digits from all lines that look like NIK region codes
+        if not ktp['nik']:
+            all_digits = ''
+            for line in lines:
+                raw = line
+                for ch, replacement in [('O','0'),('o','0'),('l','1'),('I','1'),('|','1')]:
+                    raw = raw.replace(ch, replacement)
+                all_digits += re.sub(r'\D', '', raw)
+            if len(all_digits) >= 16:
+                # Indonesian NIK starts with province code (11-99)
+                for i in range(len(all_digits) - 15):
+                    candidate = all_digits[i:i+16]
+                    if 11 <= int(candidate[:2]) <= 99:
+                        ktp['nik'] = candidate
+                        break
     
     # === Provinsi ===
     for line in lines:
