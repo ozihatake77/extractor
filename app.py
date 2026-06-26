@@ -534,20 +534,30 @@ def parse_ktp(lines, img_path=None):
             ktp['golongan_darah'] = darah_match.group(1)
     
     # === Alamat ===
-    for line in lines:
+    for i, line in enumerate(lines):
         upper = line.upper()
         if 'ALAMAT' in upper or 'ALAMA' in upper:
             val = find_value(line, ['Alamat', 'ALAMAT', 'Alama'])
-            if val:
-                # Fix OCR: "JSULTAN" → "JL. SULTAN"
+            if val and len(val) > 2:
                 val = re.sub(r'^JL?\s*\.?\s*L?\s*([A-Z])', r'JL. \1', val)
                 val = re.sub(r'^j([a-z])', r'Jl. \1', val)
-                # Fix "1.JL" → "JL."
                 val = re.sub(r'^\d+\.?\s*JL', 'JL.', val)
-                # Clean trailing noise
                 val = re.sub(r'\s+\d+\s+Te$', '', val)
                 ktp['alamat'] = val.upper().strip()
+            elif i + 1 < len(lines):
+                # EasyOCR: value on next line
+                next_val = lines[i + 1].strip()
+                if len(next_val) > 2 and not any(kw in next_val.upper() for kw in ['RT', 'RW', 'KEL', 'KEC', 'AGAMA', 'KECAMATAN']):
+                    ktp['alamat'] = next_val.upper().strip()
             break
+    # Fallback: EasyOCR variant spelling
+    if not ktp['alamat']:
+        for i, line in enumerate(lines):
+            if line.upper().strip() in ['ALAMAT', 'ALAMAR', 'ALAMER'] and i + 1 < len(lines):
+                val = lines[i + 1].strip()
+                if len(val) > 2:
+                    ktp['alamat'] = val.upper().strip()
+                break
     
     # === RT/RW ===
     for line in lines:
@@ -564,36 +574,42 @@ def parse_ktp(lines, img_path=None):
                     break
     
     # === Kelurahan/Desa ===
-    for line in lines:
+    for i, line in enumerate(lines):
         upper = line.upper()
-        if any(kw in upper for kw in ['KELURAHAN', 'DESA', 'KEL/DESA', 'KELDESA']):
-            val = find_value(line, ['Kel/Desa', 'Kelurahan', 'Desa', 'KelDesa', 'Kel'])
-            if val:
+        if any(kw in upper for kw in ['KELURAHAN', 'DESA', 'KEL/DESA', 'KELDESA', 'KELDESA', 'KEVDESA']):
+            val = find_value(line, ['Kel/Desa', 'Kelurahan', 'Desa', 'KelDesa', 'Kel', 'KevDesa'])
+            if val and len(val) > 2:
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
                 if len(val) > 2:
                     ktp['kelurahan'] = val.title()
+            elif i + 1 < len(lines):
+                next_val = re.sub(r'[^a-zA-Z\s]', '', lines[i + 1]).strip()
+                if len(next_val) > 2:
+                    ktp['kelurahan'] = next_val.title()
             break
     
     # === Kecamatan ===
-    for line in lines:
+    for i, line in enumerate(lines):
         upper = line.upper()
-        if 'KECAMATAN' in upper or 'KECAMALAN' in upper:
+        if 'KECAMATAN' in upper or 'KECAMALAN' in upper or 'KECAMALAN' in upper:
             val = find_value(line, ['Kecamatan', 'Kecamalan'])
-            if val:
+            if val and len(val) > 2:
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
                 if len(val) > 2:
                     ktp['kecamatan'] = val.title()
+            elif i + 1 < len(lines):
+                next_val = re.sub(r'[^a-zA-Z\s]', '', lines[i + 1]).strip()
+                if len(next_val) > 2:
+                    ktp['kecamatan'] = next_val.title()
             break
     
     # === Agama ===
-    for line in lines:
+    for i, line in enumerate(lines):
         upper = line.upper()
         if 'AGAMA' in upper and 'KAWIN' not in upper:
             val = find_value(line, ['Agama'])
             if val:
-                agama_upper = val.upper().strip()
-                # Fix OCR: "TISLAM" → "ISLAM"
-                agama_upper = agama_upper.strip().rstrip('-').strip()
+                agama_upper = val.upper().strip().rstrip('-').strip()
                 agama_map = {
                     'ISLAM': 'Islam', 'KRISTEN': 'Kristen', 'KATOLIK': 'Katolik',
                     'HINDU': 'Hindu', 'BUDHA': 'Buddha', 'BUDDHA': 'Buddha',
@@ -601,6 +617,18 @@ def parse_ktp(lines, img_path=None):
                 }
                 for key, agama_val in agama_map.items():
                     if key in agama_upper:
+                        ktp['agama'] = agama_val
+                        break
+            elif i + 1 < len(lines):
+                # EasyOCR: value on next line
+                next_val = lines[i + 1].strip().upper()
+                agama_map = {
+                    'ISLAM': 'Islam', 'KRISTEN': 'Kristen', 'KATOLIK': 'Katolik',
+                    'HINDU': 'Hindu', 'BUDHA': 'Buddha', 'BUDDHA': 'Buddha',
+                    'KONGHUCU': 'Konghucu'
+                }
+                for key, agama_val in agama_map.items():
+                    if key in next_val:
                         ktp['agama'] = agama_val
                         break
             break
@@ -623,21 +651,24 @@ def parse_ktp(lines, img_path=None):
             break
     
     # === Pekerjaan ===
-    for line in lines:
+    for i, line in enumerate(lines):
         upper = line.upper()
-        if 'PEKERJAAN' in upper or 'PEKERJ' in upper:
-            val = find_value(line, ['Pekerjaan', 'PEKERJAAN'])
+        if 'PEKERJAAN' in upper or 'PEKERJ' in upper or 'PEKORJAAN' in upper:
+            val = find_value(line, ['Pekerjaan', 'PEKERJAAN', 'Pekorjaan'])
             if val:
-                # Remove trailing noise
                 val = re.split(r'\s+KOTA\s+|\s+KABUPATEN\s+|\s*<.*$', val)[0]
-                # Fix OCR artifacts
                 val = val.replace('MM', '/M').replace('MMA', '/MA')
                 val = val.replace('PC', 'PE').replace('PCLA', 'PELA')
                 val = re.sub(r'\s+', ' ', val).strip()
-                # Fix merged job names
-                val = val.upper().replace('PELAJARMAHA', 'PELAJAR/MAHA').replace('PELAJARAMAHA', 'PELAJAR/MAHA')
+                val = val.upper().replace('PELAJARMAHA', 'PELAJAR/MAHA').replace('PELAJARAMAHA', 'PELAJAR/MAHA').replace('PELAJARMMAHA', 'PELAJAR/MAHA')
                 if len(val) > 2:
                     ktp['pekerjaan'] = val.title()
+            elif i + 1 < len(lines):
+                # EasyOCR: value on next line
+                next_val = lines[i + 1].strip()
+                next_val = next_val.upper().replace('PELAJARMAHA', 'PELAJAR/MAHA').replace('PELAJARMMAHA', 'PELAJAR/MAHA')
+                if len(next_val) > 2:
+                    ktp['pekerjaan'] = next_val.title()
             break
     
     # === Kewarganegaraan ===
