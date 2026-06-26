@@ -40,7 +40,9 @@ function setDocType(type) {
 btnCamera.addEventListener('click', (e) => {
     e.preventDefault();
     fileCamera.value = '';
+    fileCamera.style.display = 'block';
     fileCamera.click();
+    setTimeout(() => fileCamera.style.display = 'none', 1000);
 });
 fileCamera.addEventListener('change', (e) => {
     if (e.target.files[0]) handleFile(e.target.files[0]);
@@ -50,7 +52,9 @@ fileCamera.addEventListener('change', (e) => {
 btnGallery.addEventListener('click', (e) => {
     e.preventDefault();
     fileGallery.value = '';
+    fileGallery.style.display = 'block';
     fileGallery.click();
+    setTimeout(() => fileGallery.style.display = 'none', 1000);
 });
 fileGallery.addEventListener('change', (e) => {
     if (e.target.files[0]) handleFile(e.target.files[0]);
