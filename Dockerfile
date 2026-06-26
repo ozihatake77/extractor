@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install tesseract + system deps for OpenCV + EasyOCR
+# Install tesseract + system deps for OpenCV, EasyOCR, pyzbar
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-ind \
@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libgl1-mesa-dri \
     libgomp1 \
+    libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

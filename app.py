@@ -3,10 +3,25 @@ import re
 import json
 import tempfile
 import traceback
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import pytesseract
+
+# QR Code reader
+try:
+    from pyzbar.pyzbar import decode as qr_decode
+    HAS_QR = True
+except ImportError:
+    HAS_QR = False
+
+# OpenCV for advanced preprocessing + template matching
+try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
 
 # Google Vision (optional)
 try:
@@ -258,6 +273,362 @@ def post_correct_ocr(text):
         'g': '9',                        # g → 9
     }
     return text
+
+# ══════════════════════════════════════════════════════════════════════
+# FEATURE 1: QR Code Reader (belakang KTP)
+# ══════════════════════════════════════════════════════════════════════
+
+def read_qr_code(img_path):
+    """Read QR code from back of KTP — contains ALL data in structured format"""
+    if not HAS_QR:
+        return None
+    try:
+        img = Image.open(img_path)
+        # Try multiple preprocessing for QR detection
+        images_to_try = [img]
+        
+        if HAS_CV2:
+            img_np = np.array(img.convert('RGB'))
+            # Try grayscale
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            images_to_try.append(Image.fromarray(gray))
+            # Try binary threshold
+            _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+            images_to_try.append(Image.fromarray(binary))
+            # Try inverted
+            images_to_try.append(Image.fromarray(255 - gray))
+            # Try CLAHE
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            images_to_try.append(Image.fromarray(enhanced))
+        
+        for img_variant in images_to_try:
+            results = qr_decode(img_variant)
+            if results:
+                for result in results:
+                    data = result.data.decode('utf-8', errors='ignore')
+                    if data and len(data) > 10:
+                        return parse_qr_data(data)
+        
+        return None
+    except Exception:
+        return None
+
+def parse_qr_data(raw_data):
+    """Parse QR code data from Indonesian e-KTP
+    Format: NIK\nNama\nTempat/Tgl Lahir\nJenis Kelamin\nGol Darah\nAlamat\nRT/RW\nKel/Desa\nKecamatan\nAgama\nStatus Perkawinan\nPekerjaan\nKewarganegaraan\nBerlaku Hingga
+    """
+    lines = [l.strip() for l in raw_data.split('\n') if l.strip()]
+    if len(lines) < 5:
+        return None
+    
+    ktp = OrderedDict()
+    
+    # Map lines to fields based on position
+    field_order = [
+        'nik', 'nama', 'tempat_lahir', 'jenis_kelamin', 'golongan_darah',
+        'alamat', 'rt_rw', 'kelurahan', 'kecamatan', 'kabupaten', 'provinsi',
+        'agama', 'status_perkawinan', 'pekerjaan', 'kewarganegaraan', 'berlaku_hingga'
+    ]
+    
+    for i, field in enumerate(field_order):
+        if i < len(lines):
+            ktp[field] = lines[i]
+        else:
+            ktp[field] = ''
+    
+    # Special handling: tempat/tgl lahir might be "BEKASI, 29-08-1998"
+    if ktp.get('tempat_lahir'):
+        ttl = ktp['tempat_lahir']
+        if ',' in ttl:
+            parts = ttl.split(',', 1)
+            ktp['tempat_lahir'] = parts[0].strip()
+            ktp['tanggal_lahir'] = parts[1].strip()
+        elif re.search(r'\d{1,2}[\-/.]\d{1,2}[\-/.]\d{4}', ttl):
+            dm = re.search(r'(\d{1,2})[\-/.](\d{1,2})[\-/.](\d{4})', ttl)
+            if dm:
+                ktp['tanggal_lahir'] = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
+                ktp['tempat_lahir'] = ttl[:dm.start()].strip().rstrip(',').strip()
+    
+    return ktp
+
+# ══════════════════════════════════════════════════════════════════════
+# FEATURE 2: Template Matching — Crop Per-Field
+# ══════════════════════════════════════════════════════════════════════
+
+# KTP field regions (approximate percentages of image width/height)
+KTP_FIELD_REGIONS = {
+    'nik':            (0.25, 0.08, 0.75, 0.14),  # x1%, y1%, x2%, y2%
+    'nama':           (0.25, 0.14, 0.75, 0.20),
+    'tempat_lahir':   (0.25, 0.20, 0.50, 0.26),
+    'tanggal_lahir':  (0.50, 0.20, 0.75, 0.26),
+    'jenis_kelamin':  (0.25, 0.26, 0.50, 0.32),
+    'golongan_darah': (0.50, 0.26, 0.75, 0.32),
+    'alamat':         (0.25, 0.32, 0.75, 0.38),
+    'rt_rw':          (0.25, 0.38, 0.50, 0.44),
+    'kelurahan':      (0.25, 0.44, 0.50, 0.50),
+    'kecamatan':      (0.25, 0.50, 0.50, 0.56),
+    'agama':          (0.25, 0.56, 0.50, 0.62),
+    'status':         (0.25, 0.62, 0.50, 0.68),
+    'pekerjaan':      (0.25, 0.68, 0.50, 0.74),
+    'kewarganegaraan':(0.25, 0.74, 0.50, 0.80),
+    'berlaku_hingga': (0.25, 0.80, 0.50, 0.86),
+}
+
+def crop_field_region(img_pil, field_name):
+    """Crop a specific field region from KTP image using template coordinates"""
+    if field_name not in KTP_FIELD_REGIONS:
+        return img_pil
+    
+    w, h = img_pil.size
+    x1_pct, y1_pct, x2_pct, y2_pct = KTP_FIELD_REGIONS[field_name]
+    
+    # Add small margin for OCR accuracy
+    margin_x = int(w * 0.02)
+    margin_y = int(h * 0.01)
+    
+    x1 = max(0, int(w * x1_pct) - margin_x)
+    y1 = max(0, int(h * y1_pct) - margin_y)
+    x2 = min(w, int(w * x2_pct) + margin_x)
+    y2 = min(h, int(h * y2_pct) + margin_y)
+    
+    return img_pil.crop((x1, y1, x2, y2))
+
+def ocr_field(img_pil, field_name):
+    """OCR a specific field region with optimized preprocessing"""
+    # Upscale the crop for better OCR
+    w, h = img_pil.size
+    if w < 500:
+        scale = 800 / w
+        img_pil = img_pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    
+    # Convert to grayscale
+    gray = img_pil.convert('L')
+    
+    # Apply contrast enhancement
+    gray = ImageEnhance.Contrast(gray).enhance(2.0)
+    gray = ImageEnhance.Sharpness(gray).enhance(1.5)
+    
+    # Use Tesseract with single line mode for field extraction
+    if field_name == 'nik':
+        config = '--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789'
+    else:
+        config = '--psm 7 --oem 3 -l ind+eng'
+    
+    text = pytesseract.image_to_string(gray, config=config).strip()
+    return text
+
+def extract_fields_by_template(img_path):
+    """Extract all fields using template matching — crop each field region"""
+    img = auto_rotate_image(img_path)
+    img = upscale_if_needed(img, target_min=2000)
+    
+    fields = {}
+    for field_name in KTP_FIELD_REGIONS:
+        try:
+            cropped = crop_field_region(img, field_name)
+            text = ocr_field(cropped, field_name)
+            if text:
+                fields[field_name] = text
+        except Exception:
+            pass
+    
+    return fields
+
+# ══════════════════════════════════════════════════════════════════════
+# FEATURE 3: NIK Validation Layer
+# ══════════════════════════════════════════════════════════════════════
+
+# Indonesian province codes (digit 1-2 of NIK)
+PROVINCE_CODES = {
+    '11': 'ACEH', '12': 'SUMATERA UTARA', '13': 'SUMATERA BARAT',
+    '14': 'RIAU', '15': 'JAMBI', '16': 'SUMATERA SELATAN',
+    '17': 'BENGKULU', '18': 'LAMPUNG', '19': 'KEP. BANGKA BELITUNG',
+    '21': 'KEP. RIAU', '31': 'DKI JAKARTA', '32': 'JAWA BARAT',
+    '33': 'JAWA TENGAH', '34': 'DI YOGYAKARTA', '35': 'JAWA TIMUR',
+    '36': 'BANTEN', '51': 'BALI', '52': 'NUSA TENGGARA BARAT',
+    '53': 'NUSA TENGGARA TIMUR', '61': 'KALIMANTAN BARAT',
+    '62': 'KALIMANTAN TENGAH', '63': 'KALIMANTAN SELATAN',
+    '64': 'KALIMANTAN TIMUR', '65': 'KALIMANTAN UTARA',
+    '71': 'SULAWESI UTARA', '72': 'SULAWESI TENGAH',
+    '73': 'SULAWESI SELATAN', '74': 'SULAWESI TENGGARA',
+    '75': 'GORONTALO', '76': 'SULAWESI BARAT', '81': 'MALUKU',
+    '82': 'MALUKU UTARA', '91': 'PAPUA BARAT', '92': 'PAPUA',
+    '93': 'PAPUA SELATAN', '94': 'PAPUA TENGAH', '95': 'PAPUA PEGUNUNGAN',
+    '96': 'PAPUA BARAT DAYA',
+}
+
+def validate_nik(nik_str):
+    """Validate NIK structure and correct common OCR errors
+    Returns: (corrected_nik, is_valid, issues)
+    """
+    if not nik_str or len(nik_str) != 16:
+        return nik_str, False, ['Length is not 16']
+    
+    digits = re.sub(r'\D', '', nik_str)
+    if len(digits) != 16:
+        return nik_str, False, ['Contains non-digit characters']
+    
+    issues = []
+    
+    # Check province code (digit 1-2)
+    province_code = digits[:2]
+    if province_code not in PROVINCE_CODES:
+        issues.append(f'Invalid province code: {province_code}')
+    
+    # Check date of birth (digit 7-8 for DD, 9-10 for MM)
+    # For females, day is +40 (so 41-71 = day 1-31)
+    day = int(digits[6:8])
+    month = int(digits[8:10])
+    
+    if day > 71:
+        issues.append(f'Invalid day: {day}')
+    elif day > 40:
+        day = day - 40  # Female
+    
+    if month < 1 or month > 12:
+        issues.append(f'Invalid month: {month}')
+    
+    # Check year (digit 11-12)
+    year = int(digits[10:12])
+    # Year should be reasonable (00-99 maps to 1900-2099)
+    
+    # Check sequence number (digit 13-16) — should not be 0000
+    seq = digits[12:16]
+    if seq == '0000':
+        issues.append('Invalid sequence: 0000')
+    
+    is_valid = len(issues) == 0
+    return digits, is_valid, issues
+
+def correct_nik_ocr(nik_str, province_hint='', dob_hint=''):
+    """Try to correct common OCR errors in NIK using contextual hints"""
+    if not nik_str:
+        return nik_str
+    
+    digits = re.sub(r'\D', '', nik_str)
+    
+    # If length is wrong, try to fix
+    if len(digits) == 17:
+        # Try removing each digit and validate
+        best = None
+        best_score = -1
+        for remove_pos in range(16):
+            candidate = digits[:remove_pos] + digits[remove_pos+1:]
+            _, valid, issues = validate_nik(candidate)
+            score = (2 - len(issues))  # Higher is better
+            if province_hint and candidate[:2] in PROVINCE_CODES:
+                score += 1
+            if score > best_score:
+                best_score = score
+                best = candidate
+        if best:
+            return best
+    
+    if len(digits) != 16:
+        return nik_str
+    
+    # Try to fix province code using hint
+    if province_hint:
+        for code, name in PROVINCE_CODES.items():
+            if province_hint.upper() in name:
+                if digits[:2] != code:
+                    # Try swapping first 2 digits
+                    candidate = code + digits[2:]
+                    _, valid, _ = validate_nik(candidate)
+                    if valid:
+                        return candidate
+                break
+    
+    return digits
+
+# ══════════════════════════════════════════════════════════════════════
+# FEATURE 4: Multi-Engine Voting
+# ══════════════════════════════════════════════════════════════════════
+
+def extract_nik_multi_engine(img_path):
+    """Extract NIK using multiple engines and vote for best result"""
+    candidates = []
+    
+    # Engine 1: EasyOCR (best for Indonesian text)
+    if HAS_EASYOCR:
+        try:
+            reader = easyocr.Reader(['en', 'id'], gpu=False, verbose=False)
+            # Original image
+            results = reader.readtext(img_path)
+            for _, text, conf in results:
+                if conf > 0.3:
+                    digits = re.sub(r'\D', '', text)
+                    if len(digits) >= 16:
+                        candidates.append(digits[:16])
+            # NIK crop
+            img = auto_rotate_image(img_path)
+            img = upscale_if_needed(img, target_min=1800)
+            nik_crop = crop_nik_area(img)
+            nik_path = img_path + '.nik.png'
+            nik_crop.save(nik_path)
+            results2 = reader.readtext(nik_path)
+            for _, text, conf in results2:
+                if conf > 0.3:
+                    digits = re.sub(r'\D', '', text)
+                    if len(digits) >= 16:
+                        candidates.append(digits[:16])
+            os.unlink(nik_path)
+        except Exception:
+            pass
+    
+    # Engine 2: Tesseract with multiple preprocessing
+    for mode in ['high_contrast', 'medium', 'soft', 'raw']:
+        try:
+            img = preprocess_image(img_path, mode)
+            text = pytesseract.image_to_string(img, config='--psm 6 --oem 3 -l ind+eng')
+            for line in text.split('\n'):
+                if 'NIK' in line.upper():
+                    after = line[line.upper().find('NIK') + 3:]
+                    digits = re.sub(r'\D', '', after)
+                    if len(digits) >= 16:
+                        candidates.append(digits[:16])
+                    break
+        except Exception:
+            pass
+    
+    # Engine 3: Template crop + Tesseract
+    try:
+        img = auto_rotate_image(img_path)
+        img = upscale_if_needed(img, target_min=2000)
+        nik_region = crop_field_region(img, 'nik')
+        for contrast in [1.5, 2.0, 2.5]:
+            gray = nik_region.convert('L')
+            gray = ImageEnhance.Contrast(gray).enhance(contrast)
+            gray = ImageEnhance.Sharpness(gray).enhance(1.5)
+            text = pytesseract.image_to_string(gray, config='--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789')
+            digits = re.sub(r'\D', '', text)
+            if len(digits) >= 16:
+                candidates.append(digits[:16])
+    except Exception:
+        pass
+    
+    if not candidates:
+        return '', False
+    
+    # Validate each candidate
+    valid_candidates = []
+    for c in candidates:
+        _, valid, _ = validate_nik(c)
+        if valid:
+            valid_candidates.append(c)
+    
+    # Prefer valid candidates
+    pool = valid_candidates if valid_candidates else candidates
+    
+    # Vote: pick most common
+    if pool:
+        winner = Counter(pool).most_common(1)[0][0]
+        _, valid, issues = validate_nik(winner)
+        return winner, valid
+    
+    return '', False
+
 
 def extract_text_easyocr(img_path):
     """Extract text using EasyOCR with advanced preprocessing"""
@@ -1004,26 +1375,81 @@ def extract():
         tmp_path = tmp.name
     
     try:
-        # Choose OCR engine — EasyOCR preferred for accuracy
-        if engine == 'google' and VISION_API_KEY:
-            lines = extract_text_google_vision(tmp_path)
-            used_engine = 'google_vision'
-        elif HAS_EASYOCR:
-            # EasyOCR is most accurate for Indonesian text
-            lines = extract_text_easyocr(tmp_path)
-            used_engine = 'easyocr (AI)'
-            # Fallback to Tesseract if EasyOCR returns nothing
-            if not lines:
-                lines = extract_text_multi(tmp_path)
-                used_engine = 'tesseract (fallback)'
-        else:
-            lines = extract_text_multi(tmp_path)
-            used_engine = 'tesseract'
+        parsed = None
+        used_engine = ''
+        lines = []
         
-        if doc_type == 'kk':
-            parsed = parse_kk(lines)
+        if doc_type == 'ktp':
+            # ═══ STRATEGY 1: QR Code (100% accurate) ═══
+            qr_data = read_qr_code(tmp_path)
+            if qr_data and qr_data.get('nik'):
+                parsed = qr_data
+                used_engine = 'qr_code (100%)'
+                lines = [f"QR: {k}={v}" for k, v in qr_data.items() if v]
+            
+            # ═══ STRATEGY 2: Multi-engine OCR ═══
+            if not parsed or not parsed.get('nik'):
+                # Get text from multiple engines
+                if HAS_EASYOCR:
+                    lines = extract_text_easyocr(tmp_path)
+                    used_engine = 'easyocr (AI)'
+                if not lines:
+                    lines = extract_text_multi(tmp_path)
+                    used_engine = 'tesseract'
+                
+                # Parse with existing parser
+                parsed_ocr = parse_ktp(lines, img_path=tmp_path)
+                
+                # Merge QR data with OCR data (QR takes priority)
+                if qr_data:
+                    for k, v in qr_data.items():
+                        if v and (not parsed_ocr.get(k) or k == 'nik'):
+                            parsed_ocr[k] = v
+                
+                parsed = parsed_ocr
+            
+            # ═══ STRATEGY 3: Template matching (fill missing fields) ═══
+            template_fields = extract_fields_by_template(tmp_path)
+            for k, v in template_fields.items():
+                if v and not parsed.get(k):
+                    parsed[k] = v
+                # Special: tanggal_lahir from template
+                if k == 'tanggal_lahir' and v and not parsed.get('tanggal_lahir'):
+                    parsed['tanggal_lahir'] = v
+            
+            # ═══ STRATEGY 4: NIK multi-engine voting ═══
+            nik_multi, nik_valid = extract_nik_multi_engine(tmp_path)
+            if nik_multi:
+                _, current_valid, _ = validate_nik(parsed.get('nik', ''))
+                # Use multi-engine NIK if current is invalid or multi is valid
+                if nik_valid and not current_valid:
+                    parsed['nik'] = nik_multi
+                elif not parsed.get('nik'):
+                    parsed['nik'] = nik_multi
+            
+            # ═══ NIK VALIDATION & CORRECTION ═══
+            if parsed.get('nik'):
+                # Try to correct using province hint
+                province_hint = parsed.get('provinsi', '')
+                corrected = correct_nik_ocr(parsed['nik'], province_hint=province_hint)
+                _, valid, issues = validate_nik(corrected)
+                if valid:
+                    parsed['nik'] = corrected
+                    if used_engine and 'validation' not in used_engine:
+                        used_engine += ' + nik_validation'
+        
         else:
-            parsed = parse_ktp(lines, img_path=tmp_path)
+            # KK processing
+            if engine == 'google' and VISION_API_KEY:
+                lines = extract_text_google_vision(tmp_path)
+                used_engine = 'google_vision'
+            elif HAS_EASYOCR:
+                lines = extract_text_easyocr(tmp_path)
+                used_engine = 'easyocr (AI)'
+            else:
+                lines = extract_text_multi(tmp_path)
+                used_engine = 'tesseract'
+            parsed = parse_kk(lines)
         
         return jsonify({
             'success': True,
