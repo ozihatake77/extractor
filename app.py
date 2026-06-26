@@ -34,57 +34,194 @@ class OrderedJSONProvider(DefaultJSONProvider):
 app.json_provider_class = OrderedJSONProvider
 app.json = OrderedJSONProvider(app)
 
+# OpenCV for advanced preprocessing
+try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 # Google Vision API key (set via env var)
 VISION_API_KEY = os.environ.get('GOOGLE_VISION_API_KEY', '')
 
-def preprocess_image(img_path, mode='high_contrast'):
-    """Preprocess with multiple strategies — optimized for Indonesian KTP/KK"""
+# ── Advanced KTP Preprocessing Engine ──────────────────────────────────
+
+def auto_rotate_image(img_path):
+    """Auto-rotate image based on EXIF and detect if needs 90° rotation"""
     img = Image.open(img_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
     img = ImageOps.exif_transpose(img)
-    
     w, h = img.size
-    # Downscale large images (Tesseract optimal: 1500-2500px width)
-    if w > 2500:
-        scale = 2000 / w
+    # If image is taller than wide, might need rotation for KTP (landscape)
+    # But don't force it — KTP can be photographed in portrait
+    return img
+
+def upscale_if_needed(img, target_min=1500):
+    """Upscale small images for better OCR, downscale huge ones"""
+    w, h = img.size
+    if w < target_min:
+        scale = target_min / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-    # Upscale small images
-    elif w < 1000:
-        scale = 1500 / w
+    elif w > 3000:
+        scale = 2500 / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    return img
+
+def remove_glare_cv2(img_pil):
+    """Remove glare/reflection from KTP photo using CLAHE"""
+    if not HAS_CV2:
+        return img_pil
+    img_np = np.array(img_pil)
+    if len(img_np.shape) == 3:
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_np
+    # CLAHE — Contrast Limited Adaptive Histogram Equalization
+    # Removes local glare while preserving text
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return Image.fromarray(enhanced)
+
+def deskew_image(img_pil):
+    """Detect and correct skew/rotation in scanned document"""
+    if not HAS_CV2:
+        return img_pil
+    img_np = np.array(img_pil)
+    if len(img_np.shape) == 3:
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_np
+    # Detect edges
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    # Detect lines
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=100, maxLineGap=10)
+    if lines is None:
+        return img_pil
+    # Calculate dominant angle
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+        if abs(angle) < 30:  # Only consider near-horizontal lines
+            angles.append(angle)
+    if not angles:
+        return img_pil
+    median_angle = np.median(angles)
+    if abs(median_angle) < 0.5:  # Skip if barely tilted
+        return img_pil
+    # Rotate
+    (h, w) = gray.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+    rotated = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE)
+    return Image.fromarray(rotated)
+
+def adaptive_threshold_cv2(img_pil):
+    """Adaptive threshold — better than fixed threshold for uneven lighting"""
+    if not HAS_CV2:
+        return img_pil
+    img_np = np.array(img_pil)
+    if len(img_np.shape) == 3:
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_np
+    # Gaussian adaptive threshold — handles shadows/glare
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY, 31, 10)
+    return Image.fromarray(binary)
+
+def otsu_threshold_cv2(img_pil):
+    """Otsu's auto threshold — finds optimal cutoff automatically"""
+    if not HAS_CV2:
+        return img_pil
+    img_np = np.array(img_pil)
+    if len(img_np.shape) == 3:
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_np
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return Image.fromarray(binary)
+
+def denoise_cv2(img_pil):
+    """Non-local means denoising — preserves edges while removing noise"""
+    if not HAS_CV2:
+        return img_pil
+    img_np = np.array(img_pil)
+    if len(img_np.shape) == 3:
+        denoised = cv2.fastNlMeansDenoisingColored(img_np, None, 10, 10, 7, 21)
+    else:
+        denoised = cv2.fastNlMeansDenoising(img_np, None, 10, 7, 21)
+    return Image.fromarray(denoised)
+
+def crop_nik_area(img_pil):
+    """Crop just the NIK area (top-left portion of KTP)"""
+    w, h = img_pil.size
+    # NIK is typically in the top ~25% of the KTP, left ~60%
+    nik_region = img_pil.crop((0, 0, int(w * 0.65), int(h * 0.28)))
+    return nik_region
+
+def preprocess_image_ktp(img_path, mode='advanced'):
+    """Advanced preprocessing pipeline for Indonesian KTP/KK"""
+    img = auto_rotate_image(img_path)
+    img = upscale_if_needed(img, target_min=1800)
+    gray = img.convert('L')
     
+    if mode == 'advanced':
+        # Full pipeline: glare removal → denoise → adaptive threshold
+        gray = remove_glare_cv2(gray)
+        gray = denoise_cv2(gray)
+        gray = ImageEnhance.Contrast(gray).enhance(1.5)
+        gray = ImageEnhance.Sharpness(gray).enhance(1.3)
+        gray = adaptive_threshold_cv2(gray)
+    elif mode == 'clahe':
+        # CLAHE only — good for photos with uneven lighting
+        gray = remove_glare_cv2(gray)
+        gray = ImageEnhance.Sharpness(gray).enhance(1.2)
+    elif mode == 'otsu':
+        # Otsu threshold — good for clean scans
+        gray = ImageEnhance.Contrast(gray).enhance(1.5)
+        gray = otsu_threshold_cv2(gray)
+    elif mode == 'sharpen':
+        # Heavy sharpen — good for blurry photos
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+        gray = ImageEnhance.Sharpness(gray).enhance(2.0)
+        gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    elif mode == 'denoise':
+        # Denoise heavy — good for noisy/dark photos
+        gray = denoise_cv2(gray)
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+        gray = ImageEnhance.Brightness(gray).enhance(1.2)
+    elif mode == 'raw':
+        pass
+    
+    return gray
+
+def preprocess_image(img_path, mode='high_contrast'):
+    """Legacy preprocessing — kept for Tesseract fallback"""
+    img = auto_rotate_image(img_path)
+    img = upscale_if_needed(img, target_min=1500)
     gray = img.convert('L')
     
     if mode == 'high_contrast':
-        # Gentler contrast boost — preserve light text
-        enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(2.0)
-        enhancer = ImageEnhance.Sharpness(gray)
-        gray = enhancer.enhance(1.5)
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+        gray = ImageEnhance.Sharpness(gray).enhance(1.5)
         gray = gray.filter(ImageFilter.MedianFilter(size=3))
-        # Adaptive threshold with lower cutoff — preserves thin strokes
         gray = gray.point(lambda x: 255 if x > 100 else 0, '1')
     elif mode == 'medium':
-        enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(1.5)
-        enhancer = ImageEnhance.Sharpness(gray)
-        gray = enhancer.enhance(1.3)
+        gray = ImageEnhance.Contrast(gray).enhance(1.5)
+        gray = ImageEnhance.Sharpness(gray).enhance(1.3)
         gray = gray.filter(ImageFilter.MedianFilter(size=3))
     elif mode == 'soft':
-        # Gentle processing for well-lit photos
-        enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(1.3)
-        enhancer = ImageEnhance.Sharpness(gray)
-        gray = enhancer.enhance(1.2)
+        gray = ImageEnhance.Contrast(gray).enhance(1.3)
+        gray = ImageEnhance.Sharpness(gray).enhance(1.2)
     elif mode == 'raw':
         pass
     elif mode == 'denoise':
-        # Heavy denoise for blurry/dark photos
-        enhancer = ImageEnhance.Contrast(gray)
-        gray = enhancer.enhance(2.5)
-        enhancer = ImageEnhance.Brightness(gray)
-        gray = enhancer.enhance(1.3)
+        gray = ImageEnhance.Contrast(gray).enhance(2.5)
+        gray = ImageEnhance.Brightness(gray).enhance(1.3)
         gray = gray.filter(ImageFilter.MedianFilter(size=5))
         gray = gray.point(lambda x: 255 if x > 90 else 0, '1')
     
@@ -123,14 +260,46 @@ def post_correct_ocr(text):
     return text
 
 def extract_text_easyocr(img_path):
-    """Extract text using EasyOCR (deep learning — best for Indonesian text)"""
+    """Extract text using EasyOCR with advanced preprocessing"""
     if not HAS_EASYOCR:
         return []
     try:
         reader = easyocr.Reader(['en', 'id'], gpu=False, verbose=False)
+        
+        # Strategy 1: Original image (EasyOCR handles preprocessing internally)
         results = reader.readtext(img_path)
-        lines = [text for _, text, conf in results if conf > 0.2]
-        return lines
+        all_lines = [text for _, text, conf in results if conf > 0.2]
+        
+        # Strategy 2: CLAHE preprocessed (removes glare)
+        if HAS_CV2:
+            try:
+                img_clahe = preprocess_image_ktp(img_path, 'clahe')
+                clahe_path = img_path + '.clahe.png'
+                img_clahe.save(clahe_path)
+                results2 = reader.readtext(clahe_path)
+                for _, text, conf in results2:
+                    if conf > 0.2 and text not in all_lines:
+                        all_lines.append(text)
+                os.unlink(clahe_path)
+            except Exception:
+                pass
+        
+        # Strategy 3: NIK area crop (focused OCR for NIK)
+        try:
+            img = auto_rotate_image(img_path)
+            img = upscale_if_needed(img, target_min=1800)
+            nik_img = crop_nik_area(img)
+            nik_path = img_path + '.nik.png'
+            nik_img.save(nik_path)
+            results_nik = reader.readtext(nik_path)
+            for _, text, conf in results_nik:
+                if conf > 0.2 and text not in all_lines:
+                    all_lines.append(text)
+            os.unlink(nik_path)
+        except Exception:
+            pass
+        
+        return all_lines
     except Exception:
         return []
 
