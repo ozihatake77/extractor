@@ -185,6 +185,19 @@
             color: var(--text);
         }
         .upload-btn-gallery:hover { background: var(--surface-hover); }
+        .upload-btn-nfc {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: #fff;
+            box-shadow: 0 4px 16px rgba(16,185,129,0.3);
+        }
+        .upload-btn-nfc:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(16,185,129,0.3); }
+        .nfc-scanning {
+            animation: nfc-pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes nfc-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+            50% { box-shadow: 0 0 0 15px rgba(16,185,129,0); }
+        }
 
         /* === PREVIEW === */
         .preview-area {
@@ -449,7 +462,7 @@
             <div class="upload-content">
                 <div class="upload-icon">📸</div>
                 <p class="upload-text">Upload foto KTP / KK</p>
-                <p class="upload-hint">Pilih dari galeri atau ambil dari kamera</p>
+                <p class="upload-hint">Pilih dari galeri, ambil dari kamera, atau tap NFC</p>
             </div>
             <div class="upload-btns">
                 <button class="upload-btn upload-btn-camera" id="btn-camera">
@@ -457,6 +470,9 @@
                 </button>
                 <button class="upload-btn upload-btn-gallery" id="btn-gallery">
                     🖼️ Galeri
+                </button>
+                <button class="upload-btn upload-btn-nfc" id="btn-nfc" style="display:none;">
+                    📡 NFC
                 </button>
             </div>
             <input type="file" id="file-camera" accept="image/*" capture="environment" hidden>

@@ -839,6 +839,66 @@ def extract_nik_from_image(img_path):
     return nik_candidates[0] if nik_candidates else ''
 
 
+def fix_name_spacing(name):
+    """Fix merged names: 'DENIADI SAPUTRA' → 'DENI ADI SAPUTRA'
+    Uses common Indonesian name patterns to split merged words."""
+    if not name:
+        return name
+    
+    # Common Indonesian name prefixes/suffixes that often get merged
+    common_parts = [
+        'ADI', 'AHMAD', 'AHMAT', 'ALI', 'ANANDA', 'ANDI', 'ANGGA', 'ANWAR',
+        'BUDI', 'BAGUS', 'BAMBANG',
+        'DANIEL', 'DENI', 'DENNY', 'DEWI', 'DIAN', 'DICKY', 'DIMAS', 'DINI',
+        'DWI',
+        'EKA', 'ERIK', 'ERWIN',
+        'FADLI', 'FAHMI', 'FAJAR', 'FARHAN', 'FERRY', 'FITRI',
+        'GALIH', 'GINA',
+        'HADI', 'HAFIZ', 'HENDRA', 'HERI', 'HERRY',
+        'IBNU', 'IKHSAN', 'ILHAM', 'INDRA', 'IQBAL', 'IRFAN', 'IRWAN',
+        'JOKO', 'JULIUS',
+        'KARTIKA', 'KEVIN',
+        'LUTFI',
+        'MAMAN', 'MOHAMAD', 'MOHAMMAD', 'MUHAMAD', 'MUHAMMAD', 'MUJIONO',
+        'NANDA', 'NICO', 'NOVA', 'NUR',
+        'OKTA', 'OMAR',
+        'PAHLEVI', 'PRATAMA', 'PUTRA', 'PUTRI',
+        'RAHMAD', 'RAHMAN', 'RAHMAT', 'RAJA', 'RAMA', 'RANDI', 'RANGGA', 'RASYA', 'RATNA', 'RENDY', 'REZA', 'RIDHO', 'RIDWAN', 'RIFKI', 'RIKO', 'RINALDI', 'RINI', 'RISKI', 'RIZA', 'RIZKI', 'RIZKY', 'ROHMAN', 'ROMI', 'RONI', 'RUDI', 'RUKI',
+        'SABIL', 'SAHPUTRA', 'SAPUTRA', 'SAPUTRI', 'SEPTIAN', 'SITI', 'SOLEH', 'SONY', 'STEVEN', 'SUCIPTO', 'SUGENG', 'SUKMA', 'SULTAN',
+        'TAUFIK', 'TEGUH', 'TIARA', 'TRI', 'TUGU',
+        'UDIN',
+        'WAHYU', 'WIDODO', 'WIKI',
+        'YOGA', 'YUDHA', 'YULIUS',
+        'ZAENAL', 'ZAKI', 'ZULFIKAR',
+    ]
+    
+    name_upper = name.upper().strip()
+    words = name_upper.split()
+    
+    # If already properly spaced, just capitalize
+    if len(words) >= 3:
+        return ' '.join(w.capitalize() for w in words)
+    
+    # Try to split merged words
+    result = []
+    for word in words:
+        # Try to find a split point
+        split_found = False
+        for part in common_parts:
+            if word.startswith(part) and len(word) > len(part) + 1:
+                rest = word[len(part):]
+                # Check if rest is also a known part or looks like a name
+                if rest in common_parts or (len(rest) >= 3 and rest[0].isupper()):
+                    result.append(part)
+                    result.append(rest)
+                    split_found = True
+                    break
+        if not split_found:
+            result.append(word)
+    
+    return ' '.join(w.capitalize() for w in result)
+
+
 def parse_ktp(lines, img_path=None):
     """Smart KTP parser — fields ordered exactly like physical KTP"""
     full_text = ' '.join(lines)
@@ -933,13 +993,13 @@ def parse_ktp(lines, img_path=None):
             if val and len(val) > 2:
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
                 if len(val) > 2:
-                    ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+                    ktp['nama'] = fix_name_spacing(val)
             elif i + 1 < len(lines):
                 next_line = lines[i + 1].strip()
                 if not any(kw in next_line.upper() for kw in ['NIK', 'ALAMAT', 'LAHIR', 'AGAMA', 'KELAMIN']):
-                    val = re.sub(r'[^a-zA-Z\\s]', '', next_line).strip()
+                    val = re.sub(r'[^a-zA-Z\s]', '', next_line).strip()
                     if len(val) > 2:
-                        ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+                        ktp['nama'] = fix_name_spacing(val)
             break
     # Fallback: EasyOCR puts name on separate line after "Nama"
     if not ktp['nama']:
@@ -947,8 +1007,17 @@ def parse_ktp(lines, img_path=None):
             if line.upper().strip() == 'NAMA' and i + 1 < len(lines):
                 val = re.sub(r'[^a-zA-Z\s]', '', lines[i + 1]).strip()
                 if len(val) > 2:
-                    ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+                    ktp['nama'] = fix_name_spacing(val)
                 break
+    # Fallback: look for name pattern (2-4 capitalized words)
+    if not ktp['nama']:
+        for line in lines:
+            clean = re.sub(r'[^a-zA-Z\s]', '', line).strip()
+            words = clean.split()
+            if 2 <= len(words) <= 5 and all(w[0].isupper() for w in words if len(w) > 1):
+                if not any(kw in clean.upper() for kw in ['PROVINSI', 'KOTA', 'KABUPATEN', 'JAWA', 'SUMATERA', 'SULAWESI', 'KALIMANTAN']):
+                    ktp['nama'] = fix_name_spacing(clean)
+                    break
     
     # === Tempat/Tgl Lahir ===
     for line in lines:

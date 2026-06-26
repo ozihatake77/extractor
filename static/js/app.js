@@ -201,6 +201,100 @@ function showToast(message, isError = false) {
     setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000);
 }
 
+// ═══ NFC Reader (Web NFC API — Chrome Android) ═══
+const btnNfc = document.getElementById('btn-nfc');
+let nfcReader = null;
+
+// Show NFC button if Web NFC is supported
+if ('NDEFReader' in window) {
+    btnNfc.style.display = 'flex';
+    btnNfc.addEventListener('click', startNfcScan);
+}
+
+async function startNfcScan() {
+    if (!('NDEFReader' in window)) {
+        showToast('NFC tidak didukung di browser ini. Gunakan Chrome di Android.', true);
+        return;
+    }
+    
+    try {
+        btnNfc.classList.add('nfc-scanning');
+        btnNfc.textContent = '📡 Scanning...';
+        showToast('Dekatkan KTP ke belakang HP...');
+        
+        const ndef = new NDEFReader();
+        
+        // Set timeout
+        const timeout = setTimeout(() => {
+            btnNfc.classList.remove('nfc-scanning');
+            btnNfc.textContent = '📡 NFC';
+            showToast('Timeout — coba lagi', true);
+        }, 30000);
+        
+        await ndef.scan();
+        
+        ndef.addEventListener('reading', ({ serialNumber, message }) => {
+            clearTimeout(timeout);
+            btnNfc.classList.remove('nfc-scanning');
+            btnNfc.textContent = '📡 NFC';
+            
+            let nfcData = {
+                uid: serialNumber,
+                records: []
+            };
+            
+            // Parse NDEF records
+            if (message && message.records) {
+                for (const record of message.records) {
+                    if (record.recordType === 'text') {
+                        const textDecoder = new TextDecoder(record.encoding || 'utf-8');
+                        nfcData.records.push(textDecoder.decode(record.data));
+                    } else if (record.recordType === 'url') {
+                        const textDecoder = new TextDecoder();
+                        nfcData.records.push(textDecoder.decode(record.data));
+                    }
+                }
+            }
+            
+            // Show NFC result
+            displayNfcResult(nfcData);
+        });
+        
+    } catch (error) {
+        btnNfc.classList.remove('nfc-scanning');
+        btnNfc.textContent = '📡 NFC';
+        if (error.name === 'NotAllowedError') {
+            showToast('Izinkan akses NFC di pengaturan browser', true);
+        } else if (error.name === 'NotSupportedError') {
+            showToast('NFC tidak didukung di device ini', true);
+        } else {
+            showToast('Error NFC: ' + error.message, true);
+        }
+    }
+}
+
+function displayNfcResult(nfcData) {
+    loading.style.display = 'none';
+    resultArea.style.display = 'block';
+    resultTitle.textContent = '📋 Hasil NFC Scan';
+    scannedCard.style.display = 'none';
+    engineBadge.innerHTML = '<span class="badge">📡 NFC Reader</span>';
+    
+    let html = '';
+    html += `<tr><td>UID</td><td class="has-value">${nfcData.uid || '-'}</td></tr>`;
+    
+    if (nfcData.records.length > 0) {
+        html += `<tr><td>Data</td><td class="has-value">${nfcData.records.join('<br>')}</td></tr>`;
+    } else {
+        html += `<tr><td>Data</td><td class="empty">Chip terproteksi — butuh foto juga untuk data lengkap</td></tr>`;
+    }
+    
+    parsedData.innerHTML = html;
+    rawText.textContent = `UID: ${nfcData.uid}\nRecords: ${JSON.stringify(nfcData.records)}`;
+    
+    showToast('NFC berhasil dibaca! UID: ' + nfcData.uid);
+}
+
 // Service Worker
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
