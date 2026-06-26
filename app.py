@@ -6,7 +6,7 @@ import traceback
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import pytesseract
-import numpy as np
+
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
