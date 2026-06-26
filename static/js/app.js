@@ -6,18 +6,36 @@ const previewImg = document.getElementById('preview-img');
 const btnScan = document.getElementById('btn-scan');
 const btnReset = document.getElementById('btn-reset');
 const loading = document.getElementById('loading');
+const loadingHint = document.getElementById('loading-hint');
 const resultArea = document.getElementById('result-area');
 const resultTitle = document.getElementById('result-title');
+const engineBadge = document.getElementById('engine-badge');
 const parsedData = document.getElementById('parsed-data');
 const rawText = document.getElementById('raw-text');
 const btnCopy = document.getElementById('btn-copy');
 const btnNew = document.getElementById('btn-new');
 const btnKtp = document.getElementById('btn-ktp');
 const btnKk = document.getElementById('btn-kk');
+const btnTesseract = document.getElementById('btn-tesseract');
+const btnGoogle = document.getElementById('btn-google');
+const engineSelector = document.getElementById('engine-selector');
 
 let currentFile = null;
 let currentType = 'ktp';
+let currentEngine = 'tesseract';
 let lastResult = null;
+let googleVisionAvailable = false;
+
+// Check Google Vision availability on load
+fetch('/api/status')
+    .then(r => r.json())
+    .then(data => {
+        googleVisionAvailable = data.google_vision;
+        if (googleVisionAvailable) {
+            engineSelector.style.display = 'flex';
+        }
+    })
+    .catch(() => {});
 
 // Doc type
 btnKtp.addEventListener('click', () => setDocType('ktp'));
@@ -26,6 +44,15 @@ function setDocType(type) {
     currentType = type;
     btnKtp.classList.toggle('active', type === 'ktp');
     btnKk.classList.toggle('active', type === 'kk');
+}
+
+// Engine
+btnTesseract.addEventListener('click', () => setEngine('tesseract'));
+btnGoogle.addEventListener('click', () => setEngine('google'));
+function setEngine(engine) {
+    currentEngine = engine;
+    btnTesseract.classList.toggle('active', engine === 'tesseract');
+    btnGoogle.classList.toggle('active', engine === 'google');
 }
 
 // Upload
@@ -60,10 +87,15 @@ btnScan.addEventListener('click', async () => {
     previewArea.style.display = 'none';
     loading.style.display = 'block';
     resultArea.style.display = 'none';
+    
+    loadingHint.textContent = currentEngine === 'google' 
+        ? 'Google Vision sedang bekerja...' 
+        : 'Tesseract sedang bekerja...';
 
     const formData = new FormData();
     formData.append('file', currentFile);
     formData.append('type', currentType);
+    formData.append('engine', currentEngine);
 
     try {
         const response = await fetch('/api/extract', { method: 'POST', body: formData });
@@ -77,7 +109,7 @@ btnScan.addEventListener('click', async () => {
     }
 });
 
-// Display result as TABLE
+// Display result
 const fieldLabels = {
     nik: 'NIK', nama: 'Nama', tempat_lahir: 'Tempat Lahir', tanggal_lahir: 'Tanggal Lahir',
     jenis_kelamin: 'Jenis Kelamin', golongan_darah: 'Gol. Darah', alamat: 'Alamat',
@@ -94,6 +126,11 @@ function displayResult(data) {
     loading.style.display = 'none';
     resultArea.style.display = 'block';
     resultTitle.textContent = data.type === 'kk' ? '📋 Hasil Scan KK' : '📋 Hasil Scan KTP';
+    
+    // Engine badge
+    const engineName = data.engine || 'tesseract';
+    const engineIcon = engineName.includes('google') ? '🎯' : '⚡';
+    engineBadge.innerHTML = `<span class="badge">${engineIcon} ${engineName}</span>`;
 
     // Build table rows
     let html = '';

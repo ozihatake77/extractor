@@ -10,6 +10,7 @@
     --text-muted: #8888aa;
     --success: #4caf50;
     --danger: #ff5252;
+    --google: #4285f4;
     --border: #2a2a4a;
     --radius: 16px;
     --shadow: 0 8px 32px rgba(0,0,0,0.3);
@@ -44,7 +45,7 @@ body {
 .subtitle { color: var(--text-muted); font-size: 14px; }
 
 /* Doc Selector */
-.doc-selector { display: flex; gap: 12px; margin-bottom: 20px; }
+.doc-selector { display: flex; gap: 12px; margin-bottom: 16px; }
 .doc-btn {
     flex: 1; padding: 16px; background: var(--bg-card); border: 2px solid var(--border);
     border-radius: var(--radius); color: var(--text); cursor: pointer;
@@ -57,6 +58,20 @@ body {
     box-shadow: 0 0 20px rgba(108,99,255,0.2);
 }
 .doc-icon { font-size: 32px; }
+
+/* Engine Selector */
+.engine-selector { display: flex; gap: 10px; margin-bottom: 16px; }
+.engine-btn {
+    flex: 1; padding: 10px 12px; background: var(--bg-card); border: 2px solid var(--border);
+    border-radius: 12px; color: var(--text-muted); cursor: pointer;
+    transition: all 0.3s ease; font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.engine-btn:hover { background: var(--bg-card-hover); color: var(--text); }
+.engine-btn.active {
+    border-color: var(--google); background: rgba(66,133,244,0.1);
+    color: var(--google);
+}
 
 /* Upload */
 .upload-area {
@@ -105,62 +120,38 @@ body {
 }
 .result-header h2 { font-size: 18px; }
 .result-actions { display: flex; gap: 8px; }
+
+/* Engine Badge */
+.engine-badge { padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.badge {
+    display: inline-block; padding: 4px 12px; border-radius: 20px;
+    font-size: 12px; font-weight: 600;
+    background: rgba(66,133,244,0.15); color: var(--google);
+    border: 1px solid rgba(66,133,244,0.3);
+}
+
 .result-section { padding: 16px; border-bottom: 1px solid var(--border); }
 .result-section:last-child { border-bottom: none; }
 .result-section h3 { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
 
 /* Data TABLE */
-table.data-table {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 0 6px;
-}
-table.data-table tr {
-    background: var(--bg);
-    border-radius: 10px;
-}
-table.data-table td {
-    padding: 10px 14px;
-    vertical-align: top;
-}
+table.data-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; }
+table.data-table tr { background: var(--bg); border-radius: 10px; }
+table.data-table td { padding: 10px 14px; vertical-align: top; }
 table.data-table td:first-child {
-    width: 140px;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    border-radius: 10px 0 0 10px;
-    white-space: nowrap;
+    width: 140px; font-size: 12px; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; border-radius: 10px 0 0 10px; white-space: nowrap;
 }
-table.data-table td:last-child {
-    font-size: 15px;
-    font-weight: 500;
-    border-radius: 0 10px 10px 0;
-    word-break: break-word;
-}
-table.data-table td:last-child.empty {
-    color: var(--text-muted);
-    font-style: italic;
-    font-weight: 400;
-}
-table.data-table td:last-child.has-value {
-    color: #fff;
-}
+table.data-table td:last-child { font-size: 15px; font-weight: 500; border-radius: 0 10px 10px 0; word-break: break-word; }
+table.data-table td:last-child.empty { color: var(--text-muted); font-style: italic; font-weight: 400; }
+table.data-table td:last-child.has-value { color: #fff; }
 
 /* Raw Text */
-.raw-toggle {
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-muted);
-    padding: 8px 0;
-}
+.raw-toggle { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--text-muted); padding: 8px 0; }
 .raw-text {
     background: var(--bg); border-radius: 10px; padding: 16px;
     font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.6;
-    max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
-    margin-top: 12px;
+    max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin-top: 12px;
 }
 
 /* Footer */
@@ -181,4 +172,5 @@ table.data-table td:last-child.has-value {
     .container { padding: 12px 10px; }
     table.data-table td:first-child { width: 110px; font-size: 11px; }
     table.data-table td:last-child { font-size: 13px; }
+    .engine-btn { font-size: 12px; padding: 8px; }
 }

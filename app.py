@@ -7,8 +7,18 @@ from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import pytesseract
 
+# Google Vision (optional)
+try:
+    from google.cloud import vision
+    HAS_VISION = True
+except ImportError:
+    HAS_VISION = False
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+# Google Vision API key (set via env var)
+VISION_API_KEY = os.environ.get('GOOGLE_VISION_API_KEY', '')
 
 def preprocess_image(img_path, mode='high_contrast'):
     """Preprocess with multiple strategies"""
@@ -47,6 +57,40 @@ def ocr_pass(img_path, mode, psm):
     config = f'--psm {psm} --oem 3 -l ind+eng'
     text = pytesseract.image_to_string(img, config=config)
     lines = [l.strip() for l in text.split('\n') if l.strip() and len(l.strip()) > 1]
+    return lines
+
+def extract_text_google_vision(img_path):
+    """Extract text using Google Cloud Vision API (much more accurate)"""
+    import urllib.request
+    
+    # Read image
+    with open(img_path, 'rb') as f:
+        img_data = f.read()
+    
+    import base64
+    img_b64 = base64.b64encode(img_data).decode()
+    
+    # Call Vision API
+    url = f'https://vision.googleapis.com/v1/images:annotate?key={VISION_API_KEY}'
+    payload = json.dumps({
+        "requests": [{
+            "image": {"content": img_b64},
+            "features": [{"type": "TEXT_DETECTION"}]
+        }]
+    }).encode()
+    
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    resp = json.loads(urllib.request.urlopen(req).read())
+    
+    # Extract text
+    annotations = resp.get('responses', [{}])[0].get('textAnnotations', [])
+    if not annotations:
+        return []
+    
+    # First annotation is full text, rest are individual words
+    full_text = annotations[0].get('description', '')
+    lines = [l.strip() for l in full_text.split('\n') if l.strip() and len(l.strip()) > 1]
+    
     return lines
 
 def extract_text_multi(img_path):
@@ -505,6 +549,7 @@ def extract():
     
     file = request.files['file']
     doc_type = request.form.get('type', 'ktp')
+    engine = request.form.get('engine', 'tesseract')  # 'tesseract' or 'google'
     
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
@@ -514,7 +559,17 @@ def extract():
         tmp_path = tmp.name
     
     try:
-        lines = extract_text_multi(tmp_path)
+        # Choose OCR engine
+        if engine == 'google' and VISION_API_KEY:
+            lines = extract_text_google_vision(tmp_path)
+            used_engine = 'google_vision'
+        elif engine == 'google' and not VISION_API_KEY:
+            # Fallback to tesseract if no API key
+            lines = extract_text_multi(tmp_path)
+            used_engine = 'tesseract (no Google API key)'
+        else:
+            lines = extract_text_multi(tmp_path)
+            used_engine = 'tesseract'
         
         if doc_type == 'kk':
             parsed = parse_kk(lines)
@@ -524,6 +579,7 @@ def extract():
         return jsonify({
             'success': True,
             'type': doc_type,
+            'engine': used_engine,
             'raw_text': lines,
             'parsed': parsed
         })
@@ -536,6 +592,13 @@ def extract():
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+@app.route('/api/status')
+def status():
+    return jsonify({
+        'google_vision': bool(VISION_API_KEY),
+        'tesseract': True
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

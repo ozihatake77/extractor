@@ -36,6 +36,16 @@
             </button>
         </div>
 
+        <!-- Engine Selector -->
+        <div class="engine-selector" id="engine-selector" style="display:none;">
+            <button class="engine-btn active" data-engine="tesseract" id="btn-tesseract">
+                <span>⚡</span> Tesseract (Cepat)
+            </button>
+            <button class="engine-btn" data-engine="google" id="btn-google">
+                <span>🎯</span> Google Vision (Akurat)
+            </button>
+        </div>
+
         <!-- Upload Area -->
         <div class="upload-area" id="upload-area">
             <div class="upload-content">
@@ -63,18 +73,21 @@
         <div class="loading" id="loading" style="display:none;">
             <div class="spinner"></div>
             <p>Memproses dokumen...</p>
-            <p class="loading-hint">Tunggu sebentar, OCR sedang bekerja</p>
+            <p class="loading-hint" id="loading-hint">Tunggu sebentar...</p>
         </div>
 
         <!-- Result -->
         <div class="result-area" id="result-area" style="display:none;">
             <div class="result-header">
-                <h2 id="result-title">📋 Hasil Scan KTP</h2>
+                <h2 id="result-title">📋 Hasil Scan</h2>
                 <div class="result-actions">
                     <button class="btn btn-copy" id="btn-copy" title="Copy">📋 Copy</button>
                     <button class="btn btn-new" id="btn-new">➕ Scan Baru</button>
                 </div>
             </div>
+            
+            <!-- Engine badge -->
+            <div class="engine-badge" id="engine-badge"></div>
             
             <!-- Parsed Data as Table -->
             <div class="result-section">
