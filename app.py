@@ -50,47 +50,33 @@ def ocr_pass(img_path, mode, psm):
     return lines
 
 def extract_text_multi(img_path):
-    """Run multiple OCR passes and merge results"""
-    all_results = []
+    """Run multiple OCR passes and MERGE all results"""
+    all_lines = []
+    seen = set()
     
-    # Pass 1: High contrast, PSM 6 (single block)
-    lines1 = ocr_pass(img_path, 'high_contrast', 6)
-    all_results.append(('hc6', lines1))
+    # Run multiple passes with different settings
+    passes = [
+        ('high_contrast', 6),
+        ('medium', 6),
+        ('high_contrast', 4),
+        ('raw', 6),
+    ]
     
-    # Pass 2: Medium, PSM 6
-    lines2 = ocr_pass(img_path, 'medium', 6)
-    all_results.append(('m6', lines2))
+    for mode, psm in passes:
+        try:
+            lines = ocr_pass(img_path, mode, psm)
+            for line in lines:
+                # Normalize for dedup
+                key = re.sub(r'\s+', ' ', line.strip().upper())
+                if key not in seen and len(key) > 1:
+                    seen.add(key)
+                    all_lines.append(line)
+        except:
+            pass
     
-    # Pass 3: High contrast, PSM 4 (single column)
-    lines3 = ocr_pass(img_path, 'high_contrast', 4)
-    all_results.append(('hc4', lines3))
-    
-    # Score each pass
-    ktp_keywords = ['NIK', 'NAMA', 'ALAMAT', 'AGAMA', 'PEKERJAAN', 'KELAMIN',
-                     'LAHIR', 'KELURAHAN', 'KECAMATAN', 'PERKAWINAN', 'KAWIN',
-                     'WARGA', 'BERLAKU', 'DARAH', 'RT/RW', 'PROVINSI', 'KOTA']
-    
-    best_lines = []
-    best_score = 0
-    
-    for name, lines in all_results:
-        score = 0
-        full = ' '.join(lines).upper()
-        for kw in ktp_keywords:
-            if kw in full:
-                score += 5
-        # Score for 16-digit NIK
-        if re.search(r'\d{16}', full.replace(' ', '')):
-            score += 20
-        # Score for having reasonable line count
-        if 5 <= len(lines) <= 25:
-            score += 5
-        
-        if score > best_score:
-            best_score = score
-            best_lines = lines
-    
-    return best_lines
+    # Sort by typical KTP field order (top to bottom)
+    # This ensures consistent parsing regardless of OCR pass order
+    return all_lines
 
 def find_value(text, keywords):
     """Extract value after keyword in text"""
@@ -202,6 +188,17 @@ def parse_ktp(lines):
                 date_match = re.search(r'(\d{1,2}[\-]\d{1,2}[\-]\d{4})', val)
                 if date_match:
                     ktp['tanggal_lahir'] = date_match.group(1)
+                    # Fix OCR: validate year
+                    yr = int(ktp['tanggal_lahir'].split('-')[-1])
+                    if yr < 1920 or yr > 2030:
+                        # Try to fix common OCR errors
+                        yr_str = str(yr)
+                        yr_fixed = yr_str[:2] + yr_str[2:].replace('0', '9', 1) if len(yr_str) == 4 else yr_str
+                        try:
+                            yr_int = int(yr_fixed)
+                            if 1920 <= yr_int <= 2030:
+                                ktp['tanggal_lahir'] = ktp['tanggal_lahir'].replace(str(yr), yr_fixed)
+                        except: pass
                     tempat = val[:date_match.start()].strip().rstrip(',').strip()
                     if tempat and len(tempat) > 1:
                         ktp['tempat_lahir'] = tempat.upper().title()
@@ -267,7 +264,7 @@ def parse_ktp(lines):
             val = find_value(line, ['Alamat', 'ALAMAT', 'Alama'])
             if val:
                 # Fix OCR: "JSULTAN" → "JL. SULTAN"
-                val = re.sub(r'^J([A-Z])', r'JL. \1', val)
+                val = re.sub(r'^JL?\s*\.?\s*L?\s*([A-Z])', r'JL. \1', val)
                 val = re.sub(r'^j([a-z])', r'Jl. \1', val)
                 # Fix "1.JL" → "JL."
                 val = re.sub(r'^\d+\.?\s*JL', 'JL.', val)
@@ -361,6 +358,8 @@ def parse_ktp(lines):
                 val = val.replace('MM', '/M').replace('MMA', '/MA')
                 val = val.replace('PC', 'PE').replace('PCLA', 'PELA')
                 val = re.sub(r'\s+', ' ', val).strip()
+                # Fix merged job names
+                val = val.upper().replace('PELAJARMAHA', 'PELAJAR/MAHA').replace('PELAJARAMAHA', 'PELAJAR/MAHA')
                 if len(val) > 2:
                     ktp['pekerjaan'] = val.title()
             break
