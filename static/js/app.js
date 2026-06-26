@@ -1,6 +1,9 @@
 // DOM
 const uploadArea = document.getElementById('upload-area');
-const fileInput = document.getElementById('file-input');
+const fileCamera = document.getElementById('file-camera');
+const fileGallery = document.getElementById('file-gallery');
+const btnCamera = document.getElementById('btn-camera');
+const btnGallery = document.getElementById('btn-gallery');
 const previewArea = document.getElementById('preview-area');
 const previewImg = document.getElementById('preview-img');
 const btnScan = document.getElementById('btn-scan');
@@ -16,26 +19,13 @@ const btnCopy = document.getElementById('btn-copy');
 const btnNew = document.getElementById('btn-new');
 const btnKtp = document.getElementById('btn-ktp');
 const btnKk = document.getElementById('btn-kk');
-const btnTesseract = document.getElementById('btn-tesseract');
-const btnGoogle = document.getElementById('btn-google');
-const engineSelector = document.getElementById('engine-selector');
+const scannedCard = document.getElementById('scanned-card');
+const scannedImg = document.getElementById('scanned-img');
 
 let currentFile = null;
 let currentType = 'ktp';
-let currentEngine = 'tesseract';
 let lastResult = null;
-let googleVisionAvailable = false;
-
-// Check Google Vision availability on load
-fetch('/api/status')
-    .then(r => r.json())
-    .then(data => {
-        googleVisionAvailable = data.google_vision;
-        if (googleVisionAvailable) {
-            engineSelector.style.display = 'flex';
-        }
-    })
-    .catch(() => {});
+let previewDataUrl = null;
 
 // Doc type
 btnKtp.addEventListener('click', () => setDocType('ktp'));
@@ -46,17 +36,25 @@ function setDocType(type) {
     btnKk.classList.toggle('active', type === 'kk');
 }
 
-// Engine
-btnTesseract.addEventListener('click', () => setEngine('tesseract'));
-btnGoogle.addEventListener('click', () => setEngine('google'));
-function setEngine(engine) {
-    currentEngine = engine;
-    btnTesseract.classList.toggle('active', engine === 'tesseract');
-    btnGoogle.classList.toggle('active', engine === 'google');
-}
+// Camera button
+btnCamera.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileCamera.click();
+});
+fileCamera.addEventListener('change', (e) => {
+    if (e.target.files[0]) handleFile(e.target.files[0]);
+});
 
-// Upload
-uploadArea.addEventListener('click', () => fileInput.click());
+// Gallery button
+btnGallery.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileGallery.click();
+});
+fileGallery.addEventListener('change', (e) => {
+    if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+// Drag & drop on upload area
 uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
 uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
 uploadArea.addEventListener('drop', (e) => {
@@ -65,7 +63,6 @@ uploadArea.addEventListener('drop', (e) => {
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith('image/')) handleFile(file);
 });
-fileInput.addEventListener('change', (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); });
 
 function handleFile(file) {
     if (!file.type.startsWith('image/')) { showToast('File harus gambar!', true); return; }
@@ -73,7 +70,8 @@ function handleFile(file) {
     currentFile = file;
     const reader = new FileReader();
     reader.onload = (e) => {
-        previewImg.src = e.target.result;
+        previewDataUrl = e.target.result;
+        previewImg.src = previewDataUrl;
         uploadArea.style.display = 'none';
         previewArea.style.display = 'block';
         resultArea.style.display = 'none';
@@ -87,15 +85,13 @@ btnScan.addEventListener('click', async () => {
     previewArea.style.display = 'none';
     loading.style.display = 'block';
     resultArea.style.display = 'none';
-    
-    loadingHint.textContent = currentEngine === 'google' 
-        ? 'Google Vision sedang bekerja...' 
-        : 'Tesseract sedang bekerja...';
+
+    loadingHint.textContent = 'Tesseract sedang bekerja...';
 
     const formData = new FormData();
     formData.append('file', currentFile);
     formData.append('type', currentType);
-    formData.append('engine', currentEngine);
+    formData.append('engine', 'tesseract');
 
     try {
         const response = await fetch('/api/extract', { method: 'POST', body: formData });
@@ -114,9 +110,9 @@ const fieldLabels = {
     nik: 'NIK', nama: 'Nama', tempat_lahir: 'Tempat Lahir', tanggal_lahir: 'Tanggal Lahir',
     jenis_kelamin: 'Jenis Kelamin', golongan_darah: 'Gol. Darah', alamat: 'Alamat',
     rt_rw: 'RT/RW', kelurahan: 'Kelurahan', kecamatan: 'Kecamatan',
+    kabupaten: 'Kabupaten', provinsi: 'Provinsi',
     agama: 'Agama', status_perkawinan: 'Status', pekerjaan: 'Pekerjaan',
     kewarganegaraan: 'Warga Negara', berlaku_hingga: 'Berlaku Hingga',
-    provinsi: 'Provinsi', kabupaten: 'Kabupaten',
     nomor_kk: 'Nomor KK', nama_kepala_keluarga: 'Kepala Keluarga',
     kelurahan_desa: 'Kelurahan', kabupaten_kota: 'Kab/Kota', kode_pos: 'Kode Pos',
     anggota_keluarga: 'Anggota Keluarga'
@@ -126,13 +122,21 @@ function displayResult(data) {
     loading.style.display = 'none';
     resultArea.style.display = 'block';
     resultTitle.textContent = data.type === 'kk' ? '📋 Hasil Scan KK' : '📋 Hasil Scan KTP';
-    
+
+    // Show scanned image
+    if (previewDataUrl) {
+        scannedImg.src = previewDataUrl;
+        scannedCard.style.display = 'block';
+    } else {
+        scannedCard.style.display = 'none';
+    }
+
     // Engine badge
     const engineName = data.engine || 'tesseract';
     const engineIcon = engineName.includes('google') ? '🎯' : '⚡';
     engineBadge.innerHTML = `<span class="badge">${engineIcon} ${engineName}</span>`;
 
-    // Build table rows
+    // Build table rows (order comes from Python OrderedDict)
     let html = '';
     for (const [key, value] of Object.entries(data.parsed)) {
         if (key === 'anggota_keluarga') continue;
@@ -150,7 +154,6 @@ function displayResult(data) {
 // Copy
 btnCopy.addEventListener('click', async () => {
     if (!lastResult) return;
-    // Format as readable key-value pairs
     const lines = [];
     for (const [key, value] of Object.entries(lastResult.parsed)) {
         if (key === 'anggota_keluarga') continue;
@@ -177,7 +180,9 @@ btnReset.addEventListener('click', resetToUpload);
 btnNew.addEventListener('click', resetToUpload);
 function resetToUpload() {
     currentFile = null;
-    fileInput.value = '';
+    previewDataUrl = null;
+    fileCamera.value = '';
+    fileGallery.value = '';
     uploadArea.style.display = 'block';
     previewArea.style.display = 'none';
     loading.style.display = 'none';

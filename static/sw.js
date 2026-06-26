@@ -1,4 +1,4 @@
-const CACHE_NAME = 'extractor-v2';
+const CACHE_NAME = 'extractor-v3';
 const urlsToCache = [
     '/',
     '/static/css/style.css',

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#1a1a2e">
+    <meta name="theme-color" content="#0f0f23">
     <meta name="description" content="Scan KTP & KK - Convert foto ke text otomatis">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,13 +12,421 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
     <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
     <title>Extractor - Scan KTP & KK</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0f0f23;
+            --surface: rgba(255,255,255,0.05);
+            --surface-hover: rgba(255,255,255,0.08);
+            --glass: rgba(255,255,255,0.08);
+            --glass-border: rgba(255,255,255,0.12);
+            --primary: #6366f1;
+            --primary-glow: rgba(99,102,241,0.3);
+            --accent: #06b6d4;
+            --accent-glow: rgba(6,182,212,0.3);
+            --success: #10b981;
+            --danger: #ef4444;
+            --text: #f1f5f9;
+            --text-dim: #94a3b8;
+            --text-muted: #64748b;
+            --radius: 16px;
+            --radius-sm: 10px;
+        }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            min-height: 100dvh;
+            overflow-x: hidden;
+        }
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 20px 16px;
+            min-height: 100vh;
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* === HEADER === */
+        .header {
+            text-align: center;
+            padding: 24px 0 16px;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+        .logo-icon {
+            width: 42px; height: 42px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border-radius: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px;
+            box-shadow: 0 4px 20px var(--primary-glow);
+        }
+        .logo h1 {
+            font-size: 26px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #fff, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* === DOC SELECTOR === */
+        .doc-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .doc-btn {
+            flex: 1;
+            padding: 14px 12px;
+            background: var(--surface);
+            border: 1.5px solid var(--glass-border);
+            border-radius: var(--radius);
+            color: var(--text-dim);
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            backdrop-filter: blur(10px);
+        }
+        .doc-btn:hover { background: var(--surface-hover); }
+        .doc-btn.active {
+            background: linear-gradient(135deg, var(--primary), #4f46e5);
+            border-color: var(--primary);
+            color: #fff;
+            box-shadow: 0 4px 24px var(--primary-glow);
+            transform: translateY(-1px);
+        }
+        .doc-icon { font-size: 20px; }
+
+        /* === UPLOAD AREA === */
+        .upload-area {
+            background: var(--glass);
+            border: 2px dashed var(--glass-border);
+            border-radius: var(--radius);
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            position: relative;
+            overflow: hidden;
+        }
+        .upload-area::before {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            background: linear-gradient(135deg, var(--primary), var(--accent), var(--primary));
+            border-radius: var(--radius);
+            z-index: -1;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .upload-area:hover::before, .upload-area.dragover::before { opacity: 1; }
+        .upload-area:hover, .upload-area.dragover {
+            border-color: transparent;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(99,102,241,0.2);
+        }
+        .upload-icon { font-size: 48px; margin-bottom: 12px; }
+        .upload-text { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+        .upload-hint { font-size: 13px; color: var(--text-muted); }
+
+        /* Upload buttons row */
+        .upload-btns {
+            display: flex;
+            gap: 10px;
+            margin-top: 16px;
+        }
+        .upload-btn {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .upload-btn-camera {
+            background: linear-gradient(135deg, var(--primary), #4f46e5);
+            color: #fff;
+            box-shadow: 0 4px 16px var(--primary-glow);
+        }
+        .upload-btn-camera:hover { transform: translateY(-1px); box-shadow: 0 6px 24px var(--primary-glow); }
+        .upload-btn-gallery {
+            background: var(--surface);
+            border: 1.5px solid var(--glass-border);
+            color: var(--text);
+        }
+        .upload-btn-gallery:hover { background: var(--surface-hover); }
+
+        /* === PREVIEW === */
+        .preview-area {
+            display: none;
+            border-radius: var(--radius);
+            overflow: hidden;
+            background: var(--glass);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(10px);
+        }
+        .preview-area img {
+            width: 100%;
+            max-height: 300px;
+            object-fit: contain;
+            background: #000;
+            display: block;
+        }
+        .preview-actions {
+            display: flex;
+            gap: 10px;
+            padding: 14px;
+        }
+        .btn {
+            flex: 1;
+            padding: 13px 16px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-scan {
+            background: linear-gradient(135deg, var(--primary), #4f46e5);
+            color: #fff;
+            box-shadow: 0 4px 20px var(--primary-glow);
+        }
+        .btn-scan:hover { transform: translateY(-1px); }
+        .btn-reset {
+            background: var(--surface);
+            border: 1.5px solid var(--glass-border);
+            color: var(--text-dim);
+        }
+
+        /* === LOADING === */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 50px 20px;
+        }
+        .spinner {
+            width: 48px; height: 48px;
+            border: 3px solid var(--glass-border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading p { color: var(--text-dim); font-size: 14px; }
+        .loading-hint { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+
+        /* === RESULT === */
+        .result-area { display: none; }
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .result-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .result-actions { display: flex; gap: 8px; }
+        .btn-copy, .btn-new {
+            padding: 8px 14px !important;
+            font-size: 12px !important;
+            flex: none !important;
+        }
+        .btn-copy {
+            background: linear-gradient(135deg, var(--success), #059669) !important;
+            color: #fff !important;
+        }
+        .btn-new {
+            background: var(--surface) !important;
+            border: 1px solid var(--glass-border) !important;
+            color: var(--text-dim) !important;
+        }
+
+        /* Scanned image preview */
+        .scanned-image-card {
+            background: var(--glass);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 14px;
+            backdrop-filter: blur(10px);
+        }
+        .scanned-image-card img {
+            width: 100%;
+            max-height: 220px;
+            object-fit: contain;
+            background: #000;
+            display: block;
+        }
+        .scanned-image-label {
+            padding: 8px 12px;
+            font-size: 11px;
+            color: var(--text-muted);
+            text-align: center;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        /* Engine badge */
+        .engine-badge {
+            margin-bottom: 12px;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            background: var(--surface);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* Data table */
+        .result-section {
+            background: var(--glass);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 12px;
+            backdrop-filter: blur(10px);
+        }
+        .result-section h3 {
+            padding: 14px 16px 10px;
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .data-table tr {
+            border-top: 1px solid rgba(255,255,255,0.04);
+        }
+        .data-table td {
+            padding: 10px 16px;
+            font-size: 13px;
+        }
+        .data-table td:first-child {
+            color: var(--text-muted);
+            font-weight: 500;
+            width: 40%;
+        }
+        .data-table td.has-value {
+            color: var(--text);
+            font-weight: 600;
+        }
+        .data-table td.empty {
+            color: var(--text-muted);
+            font-style: italic;
+            opacity: 0.5;
+        }
+
+        /* Raw text */
+        details { border: none; }
+        summary.raw-toggle {
+            padding: 12px 16px;
+            font-size: 13px;
+            color: var(--text-muted);
+            cursor: pointer;
+            list-style: none;
+        }
+        summary.raw-toggle::before { content: '▶ '; font-size: 10px; }
+        details[open] summary.raw-toggle::before { content: '▼ '; }
+        .raw-text {
+            padding: 0 16px 14px;
+            font-size: 12px;
+            color: var(--text-dim);
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        /* === FOOTER === */
+        .footer {
+            margin-top: auto;
+            padding: 20px 0 12px;
+            text-align: center;
+        }
+        .footer p {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* === TOAST === */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--success);
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 9999;
+            transition: transform 0.3s ease;
+            box-shadow: 0 4px 20px rgba(16,185,129,0.3);
+        }
+        .toast.error {
+            background: var(--danger);
+            box-shadow: 0 4px 20px rgba(239,68,68,0.3);
+        }
+        .toast.show { transform: translateX(-50%) translateY(0); }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 2px; }
+    </style>
 </head>
 <body>
     <div class="container">
         <header class="header">
             <div class="logo">
-                <span class="logo-icon">📄</span>
+                <div class="logo-icon">📄</div>
                 <h1>Extractor</h1>
             </div>
             <p class="subtitle">Scan KTP & KK → Text Otomatis</p>
@@ -36,28 +444,27 @@
             </button>
         </div>
 
-        <!-- Engine Selector -->
-        <div class="engine-selector" id="engine-selector" style="display:none;">
-            <button class="engine-btn active" data-engine="tesseract" id="btn-tesseract">
-                <span>⚡</span> Tesseract (Cepat)
-            </button>
-            <button class="engine-btn" data-engine="google" id="btn-google">
-                <span>🎯</span> Google Vision (Akurat)
-            </button>
-        </div>
-
         <!-- Upload Area -->
         <div class="upload-area" id="upload-area">
             <div class="upload-content">
                 <div class="upload-icon">📸</div>
-                <p class="upload-text">Tap untuk upload foto</p>
-                <p class="upload-hint">KTP atau KK</p>
+                <p class="upload-text">Upload foto KTP / KK</p>
+                <p class="upload-hint">Pilih dari galeri atau ambil dari kamera</p>
             </div>
-            <input type="file" id="file-input" accept="image/*" hidden>
+            <div class="upload-btns">
+                <button class="upload-btn upload-btn-camera" id="btn-camera">
+                    📷 Kamera
+                </button>
+                <button class="upload-btn upload-btn-gallery" id="btn-gallery">
+                    🖼️ Galeri
+                </button>
+            </div>
+            <input type="file" id="file-camera" accept="image/*" capture="environment" hidden>
+            <input type="file" id="file-gallery" accept="image/*" hidden>
         </div>
 
         <!-- Preview -->
-        <div class="preview-area" id="preview-area" style="display:none;">
+        <div class="preview-area" id="preview-area">
             <img id="preview-img" src="" alt="Preview">
             <div class="preview-actions">
                 <button class="btn btn-scan" id="btn-scan">
@@ -70,34 +477,40 @@
         </div>
 
         <!-- Loading -->
-        <div class="loading" id="loading" style="display:none;">
+        <div class="loading" id="loading">
             <div class="spinner"></div>
             <p>Memproses dokumen...</p>
             <p class="loading-hint" id="loading-hint">Tunggu sebentar...</p>
         </div>
 
         <!-- Result -->
-        <div class="result-area" id="result-area" style="display:none;">
+        <div class="result-area" id="result-area">
             <div class="result-header">
                 <h2 id="result-title">📋 Hasil Scan</h2>
                 <div class="result-actions">
-                    <button class="btn btn-copy" id="btn-copy" title="Copy">📋 Copy</button>
+                    <button class="btn btn-copy" id="btn-copy">📋 Copy</button>
                     <button class="btn btn-new" id="btn-new">➕ Scan Baru</button>
                 </div>
             </div>
-            
+
+            <!-- Scanned Image -->
+            <div class="scanned-image-card" id="scanned-card">
+                <img id="scanned-img" src="" alt="Dokumen yang di-scan">
+                <div class="scanned-image-label">📷 Dokumen yang di-scan — periksa kesesuaian data di bawah</div>
+            </div>
+
             <!-- Engine badge -->
             <div class="engine-badge" id="engine-badge"></div>
-            
-            <!-- Parsed Data as Table -->
+
+            <!-- Parsed Data -->
             <div class="result-section">
                 <h3>📝 Data Terparse</h3>
                 <table class="data-table" id="parsed-table">
                     <tbody id="parsed-data"></tbody>
                 </table>
             </div>
-            
-            <!-- Raw Text (collapsible) -->
+
+            <!-- Raw Text -->
             <div class="result-section">
                 <details>
                     <summary class="raw-toggle">📄 Teks Mentah (Raw OCR)</summary>
