@@ -1,4 +1,4 @@
-// DOM Elements
+// DOM
 const uploadArea = document.getElementById('upload-area');
 const fileInput = document.getElementById('file-input');
 const previewArea = document.getElementById('preview-area');
@@ -7,6 +7,7 @@ const btnScan = document.getElementById('btn-scan');
 const btnReset = document.getElementById('btn-reset');
 const loading = document.getElementById('loading');
 const resultArea = document.getElementById('result-area');
+const resultTitle = document.getElementById('result-title');
 const parsedData = document.getElementById('parsed-data');
 const rawText = document.getElementById('raw-text');
 const btnCopy = document.getElementById('btn-copy');
@@ -18,61 +19,31 @@ let currentFile = null;
 let currentType = 'ktp';
 let lastResult = null;
 
-// Document type selector
+// Doc type
 btnKtp.addEventListener('click', () => setDocType('ktp'));
 btnKk.addEventListener('click', () => setDocType('kk'));
-
 function setDocType(type) {
     currentType = type;
     btnKtp.classList.toggle('active', type === 'ktp');
     btnKk.classList.toggle('active', type === 'kk');
 }
 
-// Upload area click
+// Upload
 uploadArea.addEventListener('click', () => fileInput.click());
-
-// Drag & drop
-uploadArea.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    uploadArea.classList.add('dragover');
-});
-
-uploadArea.addEventListener('dragleave', () => {
-    uploadArea.classList.remove('dragover');
-});
-
+uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
 uploadArea.addEventListener('drop', (e) => {
     e.preventDefault();
     uploadArea.classList.remove('dragover');
     const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) {
-        handleFile(file);
-    }
+    if (file && file.type.startsWith('image/')) handleFile(file);
 });
+fileInput.addEventListener('change', (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); });
 
-// File input change
-fileInput.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) {
-        handleFile(file);
-    }
-});
-
-// Handle file selection
 function handleFile(file) {
-    if (!file.type.startsWith('image/')) {
-        showToast('File harus berupa gambar!', 'error');
-        return;
-    }
-    
-    if (file.size > 16 * 1024 * 1024) {
-        showToast('Ukuran file maksimal 16MB!', 'error');
-        return;
-    }
-    
+    if (!file.type.startsWith('image/')) { showToast('File harus gambar!', true); return; }
+    if (file.size > 16 * 1024 * 1024) { showToast('Max 16MB!', true); return; }
     currentFile = file;
-    
-    // Show preview
     const reader = new FileReader();
     reader.onload = (e) => {
         previewImg.src = e.target.result;
@@ -83,117 +54,83 @@ function handleFile(file) {
     reader.readAsDataURL(file);
 }
 
-// Scan button
+// Scan
 btnScan.addEventListener('click', async () => {
     if (!currentFile) return;
-    
-    // Show loading
     previewArea.style.display = 'none';
     loading.style.display = 'block';
     resultArea.style.display = 'none';
-    
-    // Prepare form data
+
     const formData = new FormData();
     formData.append('file', currentFile);
     formData.append('type', currentType);
-    
+
     try {
-        const response = await fetch('/api/extract', {
-            method: 'POST',
-            body: formData
-        });
-        
+        const response = await fetch('/api/extract', { method: 'POST', body: formData });
         const data = await response.json();
-        
-        if (data.error) {
-            throw new Error(data.error);
-        }
-        
+        if (data.error) throw new Error(data.error);
         lastResult = data;
         displayResult(data);
-        
     } catch (error) {
-        showToast('Error: ' + error.message, 'error');
+        showToast('Error: ' + error.message, true);
         resetToUpload();
     }
 });
 
-// Display result
+// Display result as TABLE
+const fieldLabels = {
+    nik: 'NIK', nama: 'Nama', tempat_lahir: 'Tempat Lahir', tanggal_lahir: 'Tanggal Lahir',
+    jenis_kelamin: 'Jenis Kelamin', golongan_darah: 'Gol. Darah', alamat: 'Alamat',
+    rt_rw: 'RT/RW', kelurahan: 'Kelurahan', kecamatan: 'Kecamatan',
+    agama: 'Agama', status_perkawinan: 'Status', pekerjaan: 'Pekerjaan',
+    kewarganegaraan: 'Warga Negara', berlaku_hingga: 'Berlaku Hingga',
+    provinsi: 'Provinsi', kabupaten: 'Kabupaten',
+    nomor_kk: 'Nomor KK', nama_kepala_keluarga: 'Kepala Keluarga',
+    kelurahan_desa: 'Kelurahan', kabupaten_kota: 'Kab/Kota', kode_pos: 'Kode Pos',
+    anggota_keluarga: 'Anggota Keluarga'
+};
+
 function displayResult(data) {
     loading.style.display = 'none';
     resultArea.style.display = 'block';
-    
-    // Display parsed data
-    const parsed = data.parsed;
-    let tableHTML = '';
-    
-    const fieldLabels = {
-        'provinsi': 'Provinsi',
-        'kabupaten': 'Kabupaten',
-        'nik': 'NIK',
-        'nama': 'Nama',
-        'tempat_lahir': 'Tempat Lahir',
-        'tanggal_lahir': 'Tanggal Lahir',
-        'jenis_kelamin': 'Jenis Kelamin',
-        'golongan_darah': 'Golongan Darah',
-        'alamat': 'Alamat',
-        'rt_rw': 'RT/RW',
-        'kelurahan': 'Kelurahan',
-        'kecamatan': 'Kecamatan',
-        'agama': 'Agama',
-        'status_perkawinan': 'Status Perkawinan',
-        'pekerjaan': 'Pekerjaan',
-        'kewarganegaraan': 'Kewarganegaraan',
-        'berlaku_hingga': 'Berlaku Hingga',
-        'nomor_kk': 'Nomor KK',
-        'nama_kepala_keluarga': 'Nama Kepala Keluarga',
-        'kelurahan_desa': 'Kelurahan/Desa',
-        'kabupaten_kota': 'Kabupaten/Kota',
-        'kode_pos': 'Kode Pos'
-    };
-    
-    for (const [key, value] of Object.entries(parsed)) {
+    resultTitle.textContent = data.type === 'kk' ? '📋 Hasil Scan KK' : '📋 Hasil Scan KTP';
+
+    // Build table rows
+    let html = '';
+    for (const [key, value] of Object.entries(data.parsed)) {
         if (key === 'anggota_keluarga') continue;
         const label = fieldLabels[key] || key;
-        const displayValue = value || '-';
-        const emptyClass = value ? '' : ' empty';
-        tableHTML += `
-            <div class="data-row">
-                <span class="data-label">${label}</span>
-                <span class="data-value${emptyClass}">${displayValue}</span>
-            </div>
-        `;
+        const display = (value && value !== '-') ? value : '-';
+        const cls = (value && value !== '-') ? 'has-value' : 'empty';
+        html += `<tr><td>${label}</td><td class="${cls}">${display}</td></tr>`;
     }
-    
-    parsedData.innerHTML = tableHTML;
-    
-    // Display raw text
-    rawText.textContent = data.raw_text.join('\n');
+    parsedData.innerHTML = html;
+
+    // Raw text
+    rawText.textContent = (data.raw_text || []).join('\n');
 }
 
-// Copy button
+// Copy
 btnCopy.addEventListener('click', async () => {
     if (!lastResult) return;
-    
+    const text = JSON.stringify(lastResult.parsed, null, 2);
     try {
-        await navigator.clipboard.writeText(JSON.stringify(lastResult.parsed, null, 2));
-        showToast('JSON berhasil dicopy!');
-    } catch (err) {
-        // Fallback
-        const textArea = document.createElement('textarea');
-        textArea.value = JSON.stringify(lastResult.parsed, null, 2);
-        document.body.appendChild(textArea);
-        textArea.select();
+        await navigator.clipboard.writeText(text);
+        showToast('Berhasil dicopy!');
+    } catch {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
         document.execCommand('copy');
-        document.body.removeChild(textArea);
-        showToast('JSON berhasil dicopy!');
+        document.body.removeChild(ta);
+        showToast('Berhasil dicopy!');
     }
 });
 
-// Reset buttons
+// Reset
 btnReset.addEventListener('click', resetToUpload);
 btnNew.addEventListener('click', resetToUpload);
-
 function resetToUpload() {
     currentFile = null;
     fileInput.value = '';
@@ -203,31 +140,23 @@ function resetToUpload() {
     resultArea.style.display = 'none';
 }
 
-// Toast notification
-function showToast(message, type = 'success') {
+// Toast
+function showToast(message, isError = false) {
     const existing = document.querySelector('.toast');
     if (existing) existing.remove();
-    
     const toast = document.createElement('div');
-    toast.className = 'toast';
+    toast.className = 'toast' + (isError ? ' error' : '');
     toast.textContent = message;
-    if (type === 'error') {
-        toast.style.background = 'var(--danger)';
-    }
     document.body.appendChild(toast);
-    
     setTimeout(() => toast.classList.add('show'), 10);
-    setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000);
 }
 
-// Register Service Worker
+// Service Worker
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('/static/sw.js')
-            .then(reg => console.log('Service Worker registered'))
-            .catch(err => console.log('SW registration failed:', err));
+            .then(reg => console.log('SW registered'))
+            .catch(err => console.log('SW failed:', err));
     });
 }

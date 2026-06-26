@@ -16,7 +16,6 @@
 </head>
 <body>
     <div class="container">
-        <!-- Header -->
         <header class="header">
             <div class="logo">
                 <span class="logo-icon">📄</span>
@@ -25,7 +24,7 @@
             <p class="subtitle">Scan KTP & KK → Text Otomatis</p>
         </header>
 
-        <!-- Document Type Selector -->
+        <!-- Doc Type Selector -->
         <div class="doc-selector">
             <button class="doc-btn active" data-type="ktp" id="btn-ktp">
                 <span class="doc-icon">🪪</span>
@@ -70,31 +69,30 @@
         <!-- Result -->
         <div class="result-area" id="result-area" style="display:none;">
             <div class="result-header">
-                <h2>📋 Hasil Scan</h2>
+                <h2 id="result-title">📋 Hasil Scan KTP</h2>
                 <div class="result-actions">
-                    <button class="btn btn-copy" id="btn-copy" title="Copy JSON">
-                        📋 Copy
-                    </button>
-                    <button class="btn btn-new" id="btn-new">
-                        ➕ Scan Baru
-                    </button>
+                    <button class="btn btn-copy" id="btn-copy" title="Copy">📋 Copy</button>
+                    <button class="btn btn-new" id="btn-new">➕ Scan Baru</button>
                 </div>
             </div>
             
-            <!-- Parsed Data -->
+            <!-- Parsed Data as Table -->
             <div class="result-section">
-                <h3>Data Terparse</h3>
-                <div class="data-table" id="parsed-data"></div>
+                <h3>📝 Data Terparse</h3>
+                <table class="data-table" id="parsed-table">
+                    <tbody id="parsed-data"></tbody>
+                </table>
             </div>
             
-            <!-- Raw Text -->
+            <!-- Raw Text (collapsible) -->
             <div class="result-section">
-                <h3>Teks Mentah (Raw)</h3>
-                <div class="raw-text" id="raw-text"></div>
+                <details>
+                    <summary class="raw-toggle">📄 Teks Mentah (Raw OCR)</summary>
+                    <div class="raw-text" id="raw-text"></div>
+                </details>
             </div>
         </div>
 
-        <!-- Footer -->
         <footer class="footer">
             <p>⚡ Extractor PWA by Yamada</p>
         </footer>

@@ -2,59 +2,182 @@ import os
 import re
 import json
 import tempfile
+import traceback
 from flask import Flask, request, jsonify, render_template
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import pytesseract
+import numpy as np
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Configure tesseract
-pytesseract.pytesseract.tesseract_cmd = os.environ.get('TESSERACT_CMD', 'tesseract')
-
-def preprocess_image(img_path):
-    """Preprocess image for better OCR accuracy"""
+def preprocess_image(img_path, doc_type='ktp'):
+    """Advanced preprocessing for better OCR"""
     img = Image.open(img_path)
     
-    # Convert to RGB if needed
+    # Convert to RGB
     if img.mode != 'RGB':
         img = img.convert('RGB')
     
-    # Resize if too small
+    # Auto-rotate based on EXIF
+    img = ImageOps.exif_transpose(img)
+    
+    # Resize - KTP/KK needs at least 1200px width for good OCR
     width, height = img.size
-    if width < 800:
-        scale = 800 / width
+    target_w = 1600
+    if width < target_w:
+        scale = target_w / width
+        img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    elif width > 3000:
+        scale = 3000 / width
         img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
     
-    # Enhance contrast
-    enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(1.5)
+    # Convert to grayscale
+    gray = img.convert('L')
     
-    # Sharpen
-    img = img.filter(ImageFilter.SHARPEN)
+    # Increase contrast significantly
+    enhancer = ImageEnhance.Contrast(gray)
+    gray = enhancer.enhance(2.0)
     
-    # Convert to grayscale for better OCR
-    img = img.convert('L')
+    # Increase sharpness
+    enhancer = ImageEnhance.Sharpness(gray)
+    gray = enhancer.enhance(2.0)
     
-    return img
+    # Apply slight denoise with median filter
+    gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    
+    # Binarize (threshold)
+    threshold = 140
+    gray = gray.point(lambda x: 255 if x > threshold else 0, '1')
+    
+    return gray
 
-def extract_text_from_image(img_path):
-    """Extract text from image using Tesseract OCR"""
-    img = preprocess_image(img_path)
+def extract_text_ocr(img_path, doc_type='ktp'):
+    """Extract text with multiple strategies"""
+    img = preprocess_image(img_path, doc_type)
     
-    # Use Indonesian + English language
-    text = pytesseract.image_to_string(img, lang='ind+eng', config='--psm 6')
+    results = []
     
-    # Split into lines and clean
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    return lines
+    # Strategy 1: Single block (best for cards)
+    try:
+        config1 = '--psm 6 --oem 3 -l ind+eng'
+        text1 = pytesseract.image_to_string(img, config=config1)
+        lines1 = [l.strip() for l in text1.split('\n') if l.strip() and len(l.strip()) > 1]
+        results.append(('psm6', lines1))
+    except:
+        pass
+    
+    # Strategy 2: Assume uniform block of text
+    try:
+        config2 = '--psm 4 --oem 3 -l ind+eng'
+        text2 = pytesseract.image_to_string(img, config=config2)
+        lines2 = [l.strip() for l in text2.split('\n') if l.strip() and len(l.strip()) > 1]
+        results.append(('psm4', lines2))
+    except:
+        pass
+    
+    # Strategy 3: Raw line output
+    try:
+        config3 = '--psm 3 --oem 3 -l ind+eng'
+        text3 = pytesseract.image_to_string(img, config=config3)
+        lines3 = [l.strip() for l in text3.split('\n') if l.strip() and len(l.strip()) > 1]
+        results.append(('psm3', lines3))
+    except:
+        pass
+    
+    # Pick the best result (most lines with valid content)
+    best_lines = []
+    best_score = 0
+    
+    for name, lines in results:
+        score = 0
+        for line in lines:
+            upper = line.upper()
+            # Score based on known KTP/KK keywords found
+            keywords = ['NIK', 'NAMA', 'ALAMAT', 'LAHIR', 'AGAMA', 'PEKERJAAN', 
+                        'KELURAHAN', 'KECAMATAN', 'RT', 'RW', 'KELUARGA', 'KEPALA',
+                        'KABUPATEN', 'PROVINSI', 'KODE', 'PERKAWINAN', 'KAWIN',
+                        'WARGA', 'BERLAKU', 'DARAH', 'GOL']
+            for kw in keywords:
+                if kw in upper:
+                    score += 3
+            # Score for having numbers (NIK, dates)
+            if re.search(r'\d{4}', line):
+                score += 1
+            if len(line) > 3:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_lines = lines
+    
+    # Also try to get data with getdata for structured extraction
+    try:
+        data = pytesseract.image_to_data(img, config='--psm 6 --oem 3 -l ind+eng', output_type=pytesseract.Output.DICT)
+        structured = []
+        current_line = []
+        last_line_num = -1
+        for i in range(len(data['text'])):
+            text = data['text'][i].strip()
+            if not text:
+                continue
+            line_num = data['line_num'][i]
+            if line_num != last_line_num and current_line:
+                structured.append(' '.join(current_line))
+                current_line = []
+            current_line.append(text)
+            last_line_num = line_num
+        if current_line:
+            structured.append(' '.join(current_line))
+        
+        if len(structured) > len(best_lines):
+            best_lines = structured
+    except:
+        pass
+    
+    return best_lines
+
+def clean_ocr_text(text):
+    """Clean common OCR mistakes"""
+    replacements = {
+        '|': 'I',
+        '0': 'O',  # only in specific contexts - handled in parser
+        '{': '(',
+        '}': ')',
+        '  ': ' ',
+    }
+    text = text.strip()
+    return text
+
+def find_field(lines, keywords, next_line=False, colon_split=True):
+    """Find a field value by keywords"""
+    for i, line in enumerate(lines):
+        upper = line.upper()
+        for kw in keywords:
+            if kw in upper:
+                if colon_split and ':' in line:
+                    val = line.split(':', 1)[-1].strip()
+                    if val and len(val) > 1:
+                        return val
+                elif next_line and i + 1 < len(lines):
+                    val = lines[i + 1].strip()
+                    if val and ':' not in val[:5]:
+                        return val
+                # Try splitting by keyword
+                idx = upper.find(kw)
+                after = line[idx + len(kw):].strip()
+                if after and len(after) > 1:
+                    if after.startswith(':'):
+                        after = after[1:].strip()
+                    if after:
+                        return after
+    return ''
 
 def parse_ktp(texts):
-    """Parse KTP fields from extracted text"""
+    """Enhanced KTP parser"""
     full_text = ' '.join(texts)
     lines = [t.strip() for t in texts if t.strip()]
     
-    ktp_data = {
+    ktp = {
         'provinsi': '',
         'kabupaten': '',
         'nik': '',
@@ -74,148 +197,167 @@ def parse_ktp(texts):
         'berlaku_hingga': ''
     }
     
-    for i, line in enumerate(lines):
-        line_upper = line.upper().strip()
-        
-        # NIK - 16 digit number
-        nik_match = re.search(r'\b\d{16}\b', line)
-        if nik_match:
-            ktp_data['nik'] = nik_match.group()
-        
-        # Nama
-        if 'NAMA' in line_upper and ':' in line:
-            nama = line.split(':', 1)[-1].strip()
-            if nama and len(nama) > 2:
-                ktp_data['nama'] = nama.title()
-        elif 'NAMA' in line_upper and i + 1 < len(lines):
-            next_line = lines[i + 1].strip()
-            if next_line and len(next_line) > 2 and ':' not in next_line:
-                ktp_data['nama'] = next_line.title()
-        
-        # Tempat/Tgl Lahir
-        if any(x in line_upper for x in ['TEMPAT', 'LAHIR', 'TTL']):
-            if ':' in line:
-                ttl = line.split(':', 1)[-1].strip()
-                if ttl:
-                    parts = ttl.rsplit(' ', 1)
-                    if len(parts) == 2:
-                        ktp_data['tempat_lahir'] = parts[0].strip().title()
-                        ktp_data['tanggal_lahir'] = parts[1].strip()
-                    else:
-                        ktp_data['tempat_lahir'] = ttl.title()
-            elif i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                parts = next_line.rsplit(' ', 1)
-                if len(parts) == 2:
-                    ktp_data['tempat_lahir'] = parts[0].strip().title()
-                    ktp_data['tanggal_lahir'] = parts[1].strip()
-        
-        # Jenis Kelamin
-        if 'LAKI' in line_upper or 'PEREMPUAN' in line_upper:
-            if 'LAKI' in line_upper:
-                ktp_data['jenis_kelamin'] = 'Laki-laki'
-            else:
-                ktp_data['jenis_kelamin'] = 'Perempuan'
-            if ':' in line:
-                jk = line.split(':', 1)[-1].strip()
-                if jk:
-                    ktp_data['jenis_kelamin'] = jk.title()
-        
-        # Golongan Darah
-        if 'GOL' in line_upper and 'DARAH' in line_upper:
-            if ':' in line:
-                gd = line.split(':', 1)[-1].strip()
-                if gd:
-                    ktp_data['golongan_darah'] = gd.upper()
-            elif i + 1 < len(lines):
-                ktp_data['golongan_darah'] = lines[i + 1].strip().upper()
-        
-        # Alamat
-        if 'ALAMAT' in line_upper and ':' in line:
-            alamat = line.split(':', 1)[-1].strip()
-            if alamat:
-                ktp_data['alamat'] = alamat.title()
-        
-        # RT/RW
-        if 'RT' in line_upper and 'RW' in line_upper:
-            if ':' in line:
-                rtrw = line.split(':', 1)[-1].strip()
-                if rtrw:
-                    ktp_data['rt_rw'] = rtrw
-            elif i + 1 < len(lines):
-                ktp_data['rt_rw'] = lines[i + 1].strip()
-        
-        # Kelurahan/Desa
-        if any(x in line_upper for x in ['KELURAHAN', 'DESA']):
-            if ':' in line:
-                kel = line.split(':', 1)[-1].strip()
-                if kel:
-                    ktp_data['kelurahan'] = kel.title()
-        
-        # Kecamatan
-        if 'KECAMATAN' in line_upper:
-            if ':' in line:
-                kec = line.split(':', 1)[-1].strip()
-                if kec:
-                    ktp_data['kecamatan'] = kec.title()
-        
-        # Agama
-        if 'AGAMA' in line_upper:
-            if ':' in line:
-                agama = line.split(':', 1)[-1].strip()
-                if agama:
-                    ktp_data['agama'] = agama.title()
-            elif i + 1 < len(lines):
-                ktp_data['agama'] = lines[i + 1].strip().title()
-        
-        # Status Perkawinan
-        if 'PERKAWINAN' in line_upper or 'KAWIN' in line_upper:
-            if ':' in line:
-                status = line.split(':', 1)[-1].strip()
-                if status:
-                    ktp_data['status_perkawinan'] = status.title()
-        
-        # Pekerjaan
-        if 'PEKERJAAN' in line_upper:
-            if ':' in line:
-                kerja = line.split(':', 1)[-1].strip()
-                if kerja:
-                    ktp_data['pekerjaan'] = kerja.title()
-            elif i + 1 < len(lines):
-                ktp_data['pekerjaan'] = lines[i + 1].strip().title()
-        
-        # Kewarganegaraan
-        if 'WARGA' in line_upper or 'KEWARGANEGARAAN' in line_upper:
-            if ':' in line:
-                warga = line.split(':', 1)[-1].strip()
-                if warga:
-                    ktp_data['kewarganegaraan'] = warga.upper()
-            elif i + 1 < len(lines):
-                ktp_data['kewarganegaraan'] = lines[i + 1].strip().upper()
-        
-        # Berlaku Hingga
-        if 'BERLAKU' in line_upper:
-            if ':' in line:
-                berlaku = line.split(':', 1)[-1].strip()
-                if berlaku:
-                    ktp_data['berlaku_hingga'] = berlaku.upper()
-            elif 'SEUMUR' in line_upper:
-                ktp_data['berlaku_hingga'] = 'SEUMUR HIDUP'
+    # NIK - find 16 digit number (most critical)
+    all_numbers = re.findall(r'\d{16}', full_text)
+    if all_numbers:
+        ktp['nik'] = all_numbers[0]
+    else:
+        # Try with OCR error correction (O->0, I->1)
+        corrected = full_text.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
+        all_numbers = re.findall(r'\d{16}', corrected)
+        if all_numbers:
+            ktp['nik'] = all_numbers[0]
     
-    # Fallback: find NIK by pattern in full text
-    if not ktp_data['nik']:
-        nik_match = re.search(r'\b\d{16}\b', full_text)
-        if nik_match:
-            ktp_data['nik'] = nik_match.group()
+    # Nama
+    ktp['nama'] = find_field(lines, ['NAMA'])
+    # Clean nama - remove non-alpha except spaces
+    if ktp['nama']:
+        ktp['nama'] = re.sub(r'[^a-zA-Z\s.]', '', ktp['nama']).strip().title()
     
-    return ktp_data
+    # TTL
+    ttl = find_field(lines, ['TEMPAT', 'TGL LAHIR', 'TTL', 'LAHIR'])
+    if ttl:
+        # Try to split "JAKARTA, 15-08-1990" or "JAKARTA 15-08-1990"
+        parts = re.split(r'[,\s]+', ttl, maxsplit=1)
+        if len(parts) == 2:
+            ktp['tempat_lahir'] = parts[0].strip().title()
+            ktp['tanggal_lahir'] = parts[1].strip()
+        else:
+            ktp['tempat_lahir'] = ttl.title()
+    
+    # If TTL not found, try individual lines
+    if not ktp['tempat_lahir']:
+        for i, line in enumerate(lines):
+            # Look for date pattern dd-mm-yyyy or dd/mm/yyyy
+            date_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', line)
+            if date_match and i > 0:
+                ktp['tanggal_lahir'] = date_match.group(0)
+                # Previous line or same line might be tempat
+                before_date = line[:date_match.start()].strip().rstrip(',').strip()
+                if before_date and len(before_date) > 2:
+                    ktp['tempat_lahir'] = before_date.title()
+                elif i > 0:
+                    prev = lines[i-1].strip()
+                    if len(prev) > 2 and not any(x in prev.upper() for x in ['NAMA', 'NIK', 'ALAMAT']):
+                        ktp['tempat_lahir'] = prev.title()
+                break
+    
+    # Jenis Kelamin
+    jk = find_field(lines, ['JENIS KELAMIN', 'KELAMIN', 'GENDER'])
+    if jk:
+        if 'LAKI' in jk.upper() or jk.upper().strip() in ['L', 'LK', 'LAKI']:
+            ktp['jenis_kelamin'] = 'Laki-laki'
+        elif 'PEREMPUAN' in jk.upper() or 'WANITA' in jk.upper() or jk.upper().strip() in ['P', 'PR']:
+            ktp['jenis_kelamin'] = 'Perempuan'
+        else:
+            ktp['jenis_kelamin'] = jk.title()
+    else:
+        # Check in all lines
+        for line in lines:
+            upper = line.upper()
+            if 'LAKI-LAKI' in upper or 'LAKI LAKI' in upper:
+                ktp['jenis_kelamin'] = 'Laki-laki'
+                break
+            elif 'PEREMPUAN' in upper or 'WANITA' in upper:
+                ktp['jenis_kelamin'] = 'Perempuan'
+                break
+    
+    # Golongan Darah
+    gd = find_field(lines, ['GOL', 'DARAH', 'GOLONGAN DARAH'])
+    if gd:
+        gd_clean = gd.upper().strip()
+        if gd_clean in ['A', 'B', 'AB', 'O', 'A+', 'B+', 'AB+', 'O-', 'O+']:
+            ktp['golongan_darah'] = gd_clean
+        else:
+            ktp['golongan_darah'] = gd_clean[:2] if len(gd_clean) <= 3 else ''
+    
+    # Alamat
+    ktp['alamat'] = find_field(lines, ['ALAMAT'])
+    if ktp['alamat']:
+        ktp['alamat'] = ktp['alamat'].title()
+    
+    # RT/RW
+    rtrw = find_field(lines, ['RT/RW', 'RT RW', 'RT :'])
+    if rtrw:
+        # Clean: "001/002" or "001 / 002"
+        rtrw_clean = re.search(r'(\d{1,3})\s*/\s*(\d{1,3})', rtrw)
+        if rtrw_clean:
+            ktp['rt_rw'] = f"{rtrw_clean.group(1)}/{rtrw_clean.group(2)}"
+        else:
+            ktp['rt_rw'] = rtrw.strip()
+    
+    # Kelurahan
+    ktp['kelurahan'] = find_field(lines, ['KELURAHAN', 'KEL/DESA', 'DESA'])
+    if ktp['kelurahan']:
+        ktp['kelurahan'] = re.sub(r'[^a-zA-Z\s./-]', '', ktp['kelurahan']).strip().title()
+    
+    # Kecamatan
+    ktp['kecamatan'] = find_field(lines, ['KECAMATAN'])
+    if ktp['kecamatan']:
+        ktp['kecamatan'] = re.sub(r'[^a-zA-Z\s./-]', '', ktp['kecamatan']).strip().title()
+    
+    # Agama
+    ktp['agama'] = find_field(lines, ['AGAMA'])
+    if ktp['agama']:
+        agama_clean = ktp['agama'].upper().strip()
+        agama_map = {
+            'ISLAM': 'Islam', 'KRISTEN': 'Kristen', 'KATOLIK': 'Katolik',
+            'HINDU': 'Hindu', 'BUDHA': 'Buddha', 'BUDDHA': 'Buddha',
+            'KONGHUCU': 'Konghucu'
+        }
+        for key, val in agama_map.items():
+            if key in agama_clean:
+                ktp['agama'] = val
+                break
+    
+    # Status Perkawinan
+    ktp['status_perkawinan'] = find_field(lines, ['PERKAWINAN', 'STATUS', 'KAWIN'])
+    if ktp['status_perkawinan']:
+        status = ktp['status_perkawinan'].upper()
+        if 'BELUM' in status:
+            ktp['status_perkawinan'] = 'Belum Kawin'
+        elif 'KAWIN' in status and 'BELUM' not in status and 'CERAI' not in status:
+            ktp['status_perkawinan'] = 'Kawin'
+        elif 'CERAI HIDUP' in status:
+            ktp['status_perkawinan'] = 'Cerai Hidup'
+        elif 'CERAI MATI' in status:
+            ktp['status_perkawinan'] = 'Cerai Mati'
+    
+    # Pekerjaan
+    ktp['pekerjaan'] = find_field(lines, ['PEKERJAAN', 'KERJA'])
+    if ktp['pekerjaan']:
+        ktp['pekerjaan'] = ktp['pekerjaan'].title()
+    
+    # Kewarganegaraan
+    ktp['kewarganegaraan'] = find_field(lines, ['KEWARGANEGARAAN', 'WARGA', 'WNI', 'WNA'])
+    if ktp['kewarganegaraan']:
+        if 'WNI' in ktp['kewarganegaraan'].upper() or 'INDONESIA' in ktp['kewarganegaraan'].upper():
+            ktp['kewarganegaraan'] = 'WNI'
+        elif 'WNA' in ktp['kewarganegaraan'].upper():
+            ktp['kewarganegaraan'] = 'WNA'
+    
+    # Berlaku Hingga
+    ktp['berlaku_hingga'] = find_field(lines, ['BERLAKU', 'HINGGA'])
+    if ktp['berlaku_hingga']:
+        if 'SEUMUR' in ktp['berlaku_hingga'].upper():
+            ktp['berlaku_hingga'] = 'SEUMUR HIDUP'
+    
+    # Provinsi & Kabupaten (usually first 2 lines of KTP)
+    for line in lines[:4]:
+        upper = line.upper()
+        if 'PROVINSI' in upper:
+            ktp['provinsi'] = line.title()
+        elif 'KABUPATEN' in upper or 'KOTA' in upper:
+            ktp['kabupaten'] = line.title()
+    
+    return ktp
 
 def parse_kk(texts):
-    """Parse KK fields from extracted text"""
+    """Enhanced KK parser"""
     full_text = ' '.join(texts)
     lines = [t.strip() for t in texts if t.strip()]
     
-    kk_data = {
+    kk = {
         'nomor_kk': '',
         'nama_kepala_keluarga': '',
         'alamat': '',
@@ -225,70 +367,68 @@ def parse_kk(texts):
         'kabupaten_kota': '',
         'provinsi': '',
         'kode_pos': '',
-        'anggota_keluarga': []
     }
     
-    for i, line in enumerate(lines):
-        line_upper = line.upper().strip()
-        
-        # Nomor KK (16 digits)
-        kk_match = re.search(r'\b\d{16}\b', line)
-        if kk_match and not kk_data['nomor_kk']:
-            kk_data['nomor_kk'] = kk_match.group()
-        
-        # Nama Kepala Keluarga
-        if 'KEPALA' in line_upper and 'KELUARGA' in line_upper:
-            if ':' in line:
-                nama = line.split(':', 1)[-1].strip()
-                if nama:
-                    kk_data['nama_kepala_keluarga'] = nama.title()
-            elif i + 1 < len(lines):
-                kk_data['nama_kepala_keluarga'] = lines[i + 1].strip().title()
-        
-        # Alamat
-        if 'ALAMAT' in line_upper and ':' in line:
-            alamat = line.split(':', 1)[-1].strip()
-            if alamat:
-                kk_data['alamat'] = alamat.title()
-        
-        # RT/RW
-        if 'RT' in line_upper and 'RW' in line_upper and ':' in line:
-            rtrw = line.split(':', 1)[-1].strip()
-            if rtrw:
-                kk_data['rt_rw'] = rtrw
-        
-        # Kelurahan/Desa
-        if any(x in line_upper for x in ['KELURAHAN', 'DESA']) and ':' in line:
-            kel = line.split(':', 1)[-1].strip()
-            if kel:
-                kk_data['kelurahan_desa'] = kel.title()
-        
-        # Kecamatan
-        if 'KECAMATAN' in line_upper and ':' in line:
-            kec = line.split(':', 1)[-1].strip()
-            if kec:
-                kk_data['kecamatan'] = kec.title()
-        
-        # Kabupaten/Kota
-        if any(x in line_upper for x in ['KABUPATEN', 'KOTA']) and ':' in line:
-            kab = line.split(':', 1)[-1].strip()
-            if kab:
-                kk_data['kabupaten_kota'] = kab.title()
-        
-        # Provinsi
-        if 'PROVINSI' in line_upper and ':' in line:
-            prov = line.split(':', 1)[-1].strip()
-            if prov:
-                kk_data['provinsi'] = prov.title()
-        
-        # Kode Pos
-        if 'KODE' in line_upper and 'POS' in line_upper:
-            if ':' in line:
-                kp = line.split(':', 1)[-1].strip()
-                if kp:
-                    kk_data['kode_pos'] = kp
+    # Nomor KK - 16 digits
+    all_numbers = re.findall(r'\d{16}', full_text)
+    if all_numbers:
+        kk['nomor_kk'] = all_numbers[0]
+    else:
+        corrected = full_text.replace('O', '0').replace('o', '0').replace('I', '1')
+        all_numbers = re.findall(r'\d{16}', corrected)
+        if all_numbers:
+            kk['nomor_kk'] = all_numbers[0]
     
-    return kk_data
+    # Nama Kepala Keluarga
+    kk['nama_kepala_keluarga'] = find_field(lines, ['KEPALA KELUARGA', 'KEPALA', 'NAMA KEPALA'])
+    if kk['nama_kepala_keluarga']:
+        kk['nama_kepala_keluarga'] = re.sub(r'[^a-zA-Z\s.]', '', kk['nama_kepala_keluarga']).strip().title()
+    
+    # Alamat
+    kk['alamat'] = find_field(lines, ['ALAMAT'])
+    if kk['alamat']:
+        kk['alamat'] = kk['alamat'].title()
+    
+    # RT/RW
+    rtrw = find_field(lines, ['RT/RW', 'RT RW'])
+    if rtrw:
+        rtrw_clean = re.search(r'(\d{1,3})\s*/\s*(\d{1,3})', rtrw)
+        if rtrw_clean:
+            kk['rt_rw'] = f"{rtrw_clean.group(1)}/{rtrw_clean.group(2)}"
+        else:
+            kk['rt_rw'] = rtrw.strip()
+    
+    # Kelurahan/Desa
+    kk['kelurahan_desa'] = find_field(lines, ['KELURAHAN', 'DESA', 'KEL/DESA'])
+    if kk['kelurahan_desa']:
+        kk['kelurahan_desa'] = re.sub(r'[^a-zA-Z\s./-]', '', kk['kelurahan_desa']).strip().title()
+    
+    # Kecamatan
+    kk['kecamatan'] = find_field(lines, ['KECAMATAN'])
+    if kk['kecamatan']:
+        kk['kecamatan'] = re.sub(r'[^a-zA-Z\s./-]', '', kk['kecamatan']).strip().title()
+    
+    # Kabupaten/Kota
+    kk['kabupaten_kota'] = find_field(lines, ['KABUPATEN', 'KOTA'])
+    if kk['kabupaten_kota']:
+        kk['kabupaten_kota'] = kk['kabupaten_kota'].title()
+    
+    # Provinsi
+    kk['provinsi'] = find_field(lines, ['PROVINSI'])
+    if kk['provinsi']:
+        kk['provinsi'] = kk['provinsi'].title()
+    
+    # Kode Pos
+    kk['kode_pos'] = find_field(lines, ['KODE POS'])
+    if not kk['kode_pos']:
+        # Look for 5 digit number
+        for line in lines:
+            match = re.search(r'\b\d{5}\b', line)
+            if match:
+                kk['kode_pos'] = match.group()
+                break
+    
+    return kk
 
 @app.route('/')
 def index():
@@ -305,16 +445,15 @@ def extract():
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    # Save temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
         file.save(tmp.name)
         tmp_path = tmp.name
     
     try:
-        # Extract text
-        texts = extract_text_from_image(tmp_path)
+        # Extract text with multiple strategies
+        texts = extract_text_ocr(tmp_path, doc_type)
         
-        # Parse based on document type
+        # Parse
         if doc_type == 'kk':
             parsed = parse_kk(texts)
         else:
@@ -327,6 +466,7 @@ def extract():
             'parsed': parsed
         })
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         os.unlink(tmp_path)
