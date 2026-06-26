@@ -5,89 +5,109 @@ import tempfile
 import traceback
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
-import easyocr
-import numpy as np
+import pytesseract
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-reader = None
-
-def get_reader():
-    global reader
-    if reader is None:
-        reader = easyocr.Reader(['id', 'en'], gpu=False)
-    return reader
-
-def preprocess_image(img_path):
+def preprocess_image(img_path, mode='high_contrast'):
+    """Preprocess with multiple strategies"""
     img = Image.open(img_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
     img = ImageOps.exif_transpose(img)
+    
     w, h = img.size
-    if w < 1000:
-        scale = 1200 / w
+    if w < 1200:
+        scale = 1400 / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-    return img
+    
+    gray = img.convert('L')
+    
+    if mode == 'high_contrast':
+        enhancer = ImageEnhance.Contrast(gray)
+        gray = enhancer.enhance(2.5)
+        enhancer = ImageEnhance.Sharpness(gray)
+        gray = enhancer.enhance(2.0)
+        gray = gray.filter(ImageFilter.MedianFilter(size=3))
+        # Adaptive threshold
+        gray = gray.point(lambda x: 255 if x > 130 else 0, '1')
+    elif mode == 'medium':
+        enhancer = ImageEnhance.Contrast(gray)
+        gray = enhancer.enhance(1.8)
+        gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    elif mode == 'raw':
+        pass
+    
+    return gray
 
-def extract_text_easyocr(img_path):
-    reader = get_reader()
-    img = preprocess_image(img_path)
-    img_np = np.array(img)
-    results = reader.readtext(img_np, detail=1, paragraph=False)
-    results.sort(key=lambda r: (r[0][0][1], r[0][0][0]))
-    
-    lines = []
-    current_line = []
-    last_y = None
-    y_threshold = 20
-    
-    for bbox, text, conf in results:
-        center_y = (bbox[0][1] + bbox[2][1]) / 2
-        if last_y is not None and abs(center_y - last_y) > y_threshold:
-            if current_line:
-                lines.append(current_line)
-            current_line = []
-        current_line.append((bbox, text, conf))
-        last_y = center_y
-    if current_line:
-        lines.append(current_line)
-    
-    line_texts = []
-    for line in lines:
-        line.sort(key=lambda r: r[0][0][0])
-        texts = [t[1] for t in line]
-        avg_conf = sum(t[2] for t in line) / len(line)
-        line_texts.append((' '.join(texts), avg_conf))
-    
-    return line_texts, results
+def ocr_pass(img_path, mode, psm):
+    """Single OCR pass"""
+    img = preprocess_image(img_path, mode)
+    config = f'--psm {psm} --oem 3 -l ind+eng'
+    text = pytesseract.image_to_string(img, config=config)
+    lines = [l.strip() for l in text.split('\n') if l.strip() and len(l.strip()) > 1]
+    return lines
 
-def extract_after_keyword(text, keywords):
-    """Extract value after a keyword in text, handling various formats"""
+def extract_text_multi(img_path):
+    """Run multiple OCR passes and merge results"""
+    all_results = []
+    
+    # Pass 1: High contrast, PSM 6 (single block)
+    lines1 = ocr_pass(img_path, 'high_contrast', 6)
+    all_results.append(('hc6', lines1))
+    
+    # Pass 2: Medium, PSM 6
+    lines2 = ocr_pass(img_path, 'medium', 6)
+    all_results.append(('m6', lines2))
+    
+    # Pass 3: High contrast, PSM 4 (single column)
+    lines3 = ocr_pass(img_path, 'high_contrast', 4)
+    all_results.append(('hc4', lines3))
+    
+    # Score each pass
+    ktp_keywords = ['NIK', 'NAMA', 'ALAMAT', 'AGAMA', 'PEKERJAAN', 'KELAMIN',
+                     'LAHIR', 'KELURAHAN', 'KECAMATAN', 'PERKAWINAN', 'KAWIN',
+                     'WARGA', 'BERLAKU', 'DARAH', 'RT/RW', 'PROVINSI', 'KOTA']
+    
+    best_lines = []
+    best_score = 0
+    
+    for name, lines in all_results:
+        score = 0
+        full = ' '.join(lines).upper()
+        for kw in ktp_keywords:
+            if kw in full:
+                score += 5
+        # Score for 16-digit NIK
+        if re.search(r'\d{16}', full.replace(' ', '')):
+            score += 20
+        # Score for having reasonable line count
+        if 5 <= len(lines) <= 25:
+            score += 5
+        
+        if score > best_score:
+            best_score = score
+            best_lines = lines
+    
+    return best_lines
+
+def find_value(text, keywords):
+    """Extract value after keyword in text"""
     upper = text.upper()
     for kw in keywords:
-        kw_upper = kw.upper()
-        idx = upper.find(kw_upper)
+        idx = upper.find(kw.upper())
         if idx >= 0:
             after = text[idx + len(kw):]
-            # Clean leading separators
-            after = re.sub(r'^[\s:=\-_,;]+', '', after).strip()
-            return after
+            after = re.sub(r'^[\s:=\-_,;.>]+', '', after).strip()
+            if after:
+                return after
     return None
 
-def clean_value(text):
-    """Clean OCR artifacts from a value"""
-    if not text:
-        return ''
-    text = text.strip()
-    # Remove trailing noise
-    text = re.sub(r'[\s\-=_<>|/\\]+$', '', text)
-    # Remove leading noise  
-    text = re.sub(r'^[\s\-=_<>|/\\]+', '', text)
-    return text.strip()
-
-def parse_ktp_easyocr(line_texts, raw_results):
-    full_text = ' '.join([t[0] for t in line_texts])
+def parse_ktp(lines):
+    """Smart KTP parser based on patterns"""
+    full_text = ' '.join(lines)
+    full_upper = full_text.upper()
     
     ktp = {
         'provinsi': '', 'kabupaten': '', 'nik': '', 'nama': '',
@@ -97,166 +117,210 @@ def parse_ktp_easyocr(line_texts, raw_results):
         'pekerjaan': '', 'kewarganegaraan': '', 'berlaku_hingga': ''
     }
     
-    # === NIK ===
-    nik_match = re.search(r'(\d{16})', full_text.replace(' ', ''))
+    # === NIK: find 16 consecutive digits ===
+    # Try multiple strategies
+    # 1. Direct 16 digits in full text
+    nik_match = re.search(r'\b(\d{16})\b', full_text.replace(' ', ''))
     if nik_match:
         ktp['nik'] = nik_match.group(1)
+    else:
+        # 2. NIK might be split across text: "3603192904 7460001" → concat digits
+        for line in lines:
+            if 'NIK' in line.upper():
+                digits = re.sub(r'\D', '', line)
+                if len(digits) >= 16:
+                    ktp['nik'] = digits[:16]
+                    break
+        # 3. Look for any 16-digit sequence with possible spaces
+        if not ktp['nik']:
+            for line in lines:
+                compact = line.replace(' ', '')
+                match = re.search(r'\d{16}', compact)
+                if match:
+                    ktp['nik'] = match.group()
+                    break
     
     # === Provinsi ===
-    for text, conf in line_texts:
-        if 'PROVINSI' in text.upper():
-            val = extract_after_keyword(text, ['PROVINSI'])
+    for line in lines:
+        if 'PROVINSI' in line.upper():
+            val = find_value(line, ['PROVINSI'])
             if val:
-                # Fix common OCR: "BARA /" → "BARAT"
-                val = re.sub(r'\s*/\s*$', 'T', val)
+                # Fix: "BARA /" → "BARAT", clean special chars
+                val = re.sub(r'\s*[/\\|]\s*$', 'T', val)
+                val = re.sub(r'^[\-—\s]+', '', val)
                 val = re.sub(r'\s+', ' ', val).strip()
-                ktp['provinsi'] = val.title()
+                if len(val) > 3:
+                    ktp['provinsi'] = val.title()
             break
     
     # === Kabupaten/Kota ===
-    for text, conf in line_texts:
-        upper = text.upper()
-        if 'KOTA' in upper or 'KABUPATEN' in upper:
-            # Only if it's a standalone line (not part of other field)
-            if not any(kw in upper for kw in ['ALAMAT', 'PEKERJAAN', 'LAHIR']):
-                ktp['kabupaten'] = clean_value(text).title()
+    for line in lines:
+        upper = line.upper()
+        if ('KOTA' in upper or 'KABUPATEN' in upper) and 'BEKASI' not in upper:
+            # Check it's not part of another field
+            if not any(kw in upper for kw in ['ALAMAT', 'PEKERJAAN', 'LAHIR', 'NIK']):
+                val = re.sub(r'^[\-—\s:=_]+', '', line).strip()
+                if len(val) > 3:
+                    ktp['kabupaten'] = val.title()
+                    break
+    # Also look for "KOTA XXX" pattern
+    if not ktp['kabupaten']:
+        for line in lines:
+            upper = line.upper()
+            if 'KOTA' in upper and not any(kw in upper for kw in ['ALAMAT', 'PEKERJAAN']):
+                ktp['kabupaten'] = line.strip().title()
                 break
     
     # === Nama ===
-    for text, conf in line_texts:
-        if 'NAMA' in text.upper() and 'NAMAKA' not in text.upper():
-            val = extract_after_keyword(text, ['Nama'])
+    for i, line in enumerate(lines):
+        upper = line.upper()
+        if 'NAMA' in upper and 'NAMAKA' not in upper:
+            val = find_value(line, ['Nama'])
             if val and len(val) > 2:
-                # Fix spacing: "DeniAdi" → "Deni Adi"
-                val = re.sub(r'([a-z])([A-Z])', r'\1 \2', val)
-                # Remove non-alpha except spaces
+                # Clean: only alpha + spaces
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
-                ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+                if len(val) > 2:
+                    ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
+            elif i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                # Check next line isn't another field label
+                if not any(kw in next_line.upper() for kw in ['NIK', 'ALAMAT', 'LAHIR', 'AGAMA', 'KELAMIN']):
+                    val = re.sub(r'[^a-zA-Z\s]', '', next_line).strip()
+                    if len(val) > 2:
+                        ktp['nama'] = ' '.join(w.capitalize() for w in val.split())
             break
     
     # === Tempat/Tgl Lahir ===
-    for text, conf in line_texts:
-        upper = text.upper()
-        if 'LAHIR' in upper or 'TEMPAT' in upper or 'TTL' in upper:
-            val = extract_after_keyword(text, ['Tempat/Tgl Lahir', 'Tempat', 'Tgl Lahir', 'TTL', 'Lahir'])
+    for line in lines:
+        upper = line.upper()
+        if any(kw in upper for kw in ['LAHIR', 'TEMPAT', 'TTL']):
+            val = find_value(line, ['Tempat/Tgl Lahir', 'Tempat/TgiLahir', 'Tempat', 'Tgl Lahir', 'TgiLahir', 'TTL', 'Lahir'])
             if val:
-                # Fix OCR: "BEKaSI, 29 08 1998" → "BEKASI, 29-08-1998"
+                # Fix OCR: "BEKaSI" → "BEKASI", "29 08 1998" → "29-08-1998"
                 val = val.replace('  ', '-')
-                # Fix common OCR errors
-                val = val.replace('BEKaSI', 'BEKASI').replace('BEKa', 'BEKA')
-                
-                # Try to split place and date
+                # Try to split
                 date_match = re.search(r'(\d{1,2}[\-]\d{1,2}[\-]\d{4})', val)
                 if date_match:
                     ktp['tanggal_lahir'] = date_match.group(1)
                     tempat = val[:date_match.start()].strip().rstrip(',').strip()
-                    if tempat:
+                    if tempat and len(tempat) > 1:
                         ktp['tempat_lahir'] = tempat.upper().title()
                 else:
-                    # Maybe date is separate
                     parts = val.split(',', 1)
                     if len(parts) == 2:
                         ktp['tempat_lahir'] = parts[0].strip().title()
                         ktp['tanggal_lahir'] = parts[1].strip().replace(' ', '-')
-                    else:
+                    elif len(val) > 2:
                         ktp['tempat_lahir'] = val.title()
             break
     
     # Fallback: find date pattern
     if not ktp['tanggal_lahir']:
-        for text, conf in line_texts:
-            date_match = re.search(r'(\d{1,2}[\-]\d{1,2}[\-]\d{4})', text)
-            if date_match:
-                ktp['tanggal_lahir'] = date_match.group(1)
+        for line in lines:
+            match = re.search(r'(\d{1,2}[\-/]\d{1,2}[\-/]\d{4})', line)
+            if match:
+                ktp['tanggal_lahir'] = match.group(1).replace(' ', '-')
                 break
     
     # === Jenis Kelamin ===
-    for text, conf in line_texts:
-        upper = text.upper()
+    for line in lines:
+        upper = line.upper()
         if 'KELAMIN' in upper or 'JENIS' in upper:
             if 'LAKI' in upper:
                 ktp['jenis_kelamin'] = 'Laki-laki'
             elif 'PEREMPUAN' in upper or 'WANITA' in upper:
                 ktp['jenis_kelamin'] = 'Perempuan'
             break
-    # Fallback
     if not ktp['jenis_kelamin']:
-        for text, conf in line_texts:
-            if 'LAKI-LAKI' in text.upper() or 'LAKI LAKI' in text.upper():
+        for line in lines:
+            if 'LAKI' in line.upper():
                 ktp['jenis_kelamin'] = 'Laki-laki'
                 break
     
     # === Golongan Darah ===
-    for text, conf in line_texts:
-        upper = text.upper()
+    for line in lines:
+        upper = line.upper()
         if 'DARAH' in upper:
-            # Try to find blood type value
-            val = extract_after_keyword(text, ['Gol. Darah', 'Gol Darah', 'Golongan Darah', 'Darah', 'Goldarah'])
+            val = find_value(line, ['Gol. Darah', 'Gol Darah', 'Golongan Darah', 'Darah'])
             if val:
                 val_clean = val.upper().strip()[:3]
-                blood_types = ['A', 'B', 'AB', 'O']
-                for bt in blood_types:
+                for bt in ['A', 'B', 'AB', 'O']:
                     if val_clean.startswith(bt):
                         ktp['golongan_darah'] = bt
                         break
-            # Also check if it's embedded in the line
+            # Also check for standalone blood type
             if not ktp['golongan_darah']:
-                match = re.search(r'\b(A|B|AB|O)\b', upper)
-                if match and 'LAKI' not in upper[:match.start()]:
+                match = re.search(r'\b(A|B|AB|O)\b', upper.split('DARAH')[-1] if 'DARAH' in upper else '')
+                if match:
                     ktp['golongan_darah'] = match.group(1)
             break
+    # Fallback: look for standalone blood type near "DARAH" in full text
+    if not ktp['golongan_darah']:
+        darah_match = re.search(r'DARAH\s*[=:]\s*(A|B|AB|O)\b', full_upper)
+        if darah_match:
+            ktp['golongan_darah'] = darah_match.group(1)
     
     # === Alamat ===
-    for text, conf in line_texts:
-        if 'ALAMAT' in text.upper() or 'ALAMA' in text.upper():
-            val = extract_after_keyword(text, ['Alamat', 'Alamat', 'ALAMAT', 'Alama'])
+    for line in lines:
+        upper = line.upper()
+        if 'ALAMAT' in upper or 'ALAMA' in upper:
+            val = find_value(line, ['Alamat', 'ALAMAT', 'Alama'])
             if val:
-                # Fix OCR: "JSULTAN" → "JL SULTAN"
-                val = re.sub(r'^J([A-Z])', r'JL \1', val)
-                val = re.sub(r'^j([a-z])', r'Jl \1', val)
-                ktp['alamat'] = val.upper()
+                # Fix OCR: "JSULTAN" → "JL. SULTAN"
+                val = re.sub(r'^J([A-Z])', r'JL. \1', val)
+                val = re.sub(r'^j([a-z])', r'Jl. \1', val)
+                # Fix "1.JL" → "JL."
+                val = re.sub(r'^\d+\.?\s*JL', 'JL.', val)
+                # Clean trailing noise
+                val = re.sub(r'\s+\d+\s+Te$', '', val)
+                ktp['alamat'] = val.upper().strip()
             break
     
     # === RT/RW ===
-    for text, conf in line_texts:
-        if 'RT' in text.upper() and '/' in text:
-            match = re.search(r'(\d{1,3})\s*/\s*(\d{1,3})', text)
-            if match:
-                ktp['rt_rw'] = f"{match.group(1).zfill(3)}/{match.group(2).zfill(3)}"
-                break
-    # Fallback: standalone RT/RW pattern
+    for line in lines:
+        match = re.search(r'(\d{3})\s*/\s*(\d{3})', line)
+        if match:
+            ktp['rt_rw'] = f"{match.group(1)}/{match.group(2)}"
+            break
     if not ktp['rt_rw']:
-        for text, conf in line_texts:
-            match = re.search(r'(\d{3})\s*/\s*(\d{3})', text)
-            if match and len(text) < 15:  # Short line, likely RT/RW
-                ktp['rt_rw'] = f"{match.group(1)}/{match.group(2)}"
-                break
+        for line in lines:
+            if 'RT' in line.upper() and '/' in line:
+                match = re.search(r'(\d{1,3})\s*/\s*(\d{1,3})', line)
+                if match:
+                    ktp['rt_rw'] = f"{match.group(1).zfill(3)}/{match.group(2).zfill(3)}"
+                    break
     
     # === Kelurahan/Desa ===
-    for text, conf in line_texts:
-        upper = text.upper()
-        if 'KEL' in upper and 'DESA' in upper or 'KELURAHAN' in upper or 'KELDESA' in upper:
-            val = extract_after_keyword(text, ['Kel/Desa', 'Kelurahan', 'Desa', 'KelDesa', 'Kel'])
+    for line in lines:
+        upper = line.upper()
+        if any(kw in upper for kw in ['KELURAHAN', 'DESA', 'KEL/DESA', 'KELDESA']):
+            val = find_value(line, ['Kel/Desa', 'Kelurahan', 'Desa', 'KelDesa', 'Kel'])
             if val:
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
-                ktp['kelurahan'] = val.title()
+                if len(val) > 2:
+                    ktp['kelurahan'] = val.title()
             break
     
     # === Kecamatan ===
-    for text, conf in line_texts:
-        if 'KECAMATAN' in text.upper() or 'KECAMALAN' in text.upper():
-            val = extract_after_keyword(text, ['Kecamatan', 'Kecamalan'])
+    for line in lines:
+        upper = line.upper()
+        if 'KECAMATAN' in upper or 'KECAMALAN' in upper:
+            val = find_value(line, ['Kecamatan', 'Kecamalan'])
             if val:
                 val = re.sub(r'[^a-zA-Z\s]', '', val).strip()
-                ktp['kecamatan'] = val.title()
+                if len(val) > 2:
+                    ktp['kecamatan'] = val.title()
             break
     
     # === Agama ===
-    for text, conf in line_texts:
-        if 'AGAMA' in text.upper():
-            val = extract_after_keyword(text, ['Agama'])
+    for line in lines:
+        upper = line.upper()
+        if 'AGAMA' in upper and 'KAWIN' not in upper:
+            val = find_value(line, ['Agama'])
             if val:
                 agama_upper = val.upper().strip()
+                # Fix OCR: "TISLAM" → "ISLAM"
+                agama_upper = agama_upper.strip().rstrip('-').strip()
                 agama_map = {
                     'ISLAM': 'Islam', 'KRISTEN': 'Kristen', 'KATOLIK': 'Katolik',
                     'HINDU': 'Hindu', 'BUDHA': 'Buddha', 'BUDDHA': 'Buddha',
@@ -266,15 +330,13 @@ def parse_ktp_easyocr(line_texts, raw_results):
                     if key in agama_upper:
                         ktp['agama'] = agama_val
                         break
-                if not ktp['agama']:
-                    ktp['agama'] = val.title()
             break
     
     # === Status Perkawinan ===
-    for text, conf in line_texts:
-        upper = text.upper()
-        if 'PERKAWINAN' in upper or 'PERKAWNAN' in upper or ('STATUS' in upper and 'KAWIN' in upper):
-            val = extract_after_keyword(text, ['Status Perkawinan', 'Perkawinan', 'Perkawnan', 'Status'])
+    for line in lines:
+        upper = line.upper()
+        if 'PERKAWINAN' in upper or 'PERKAWNAN' in upper or 'KAWIN' in upper:
+            val = find_value(line, ['Status Perkawinan', 'Perkawinan', 'Perkawnan', 'Status'])
             if val:
                 status_upper = val.upper()
                 if 'BELUM' in status_upper:
@@ -288,23 +350,26 @@ def parse_ktp_easyocr(line_texts, raw_results):
             break
     
     # === Pekerjaan ===
-    for text, conf in line_texts:
-        if 'PEKERJAAN' in text.upper() or 'PEKORJAAN' in text.upper() or 'PEKERJAN' in text.upper():
-            val = extract_after_keyword(text, ['Pekerjaan', 'Pekorjaan', 'Pekerjan'])
+    for line in lines:
+        upper = line.upper()
+        if 'PEKERJAAN' in upper or 'PEKERJ' in upper:
+            val = find_value(line, ['Pekerjaan', 'PEKERJAAN'])
             if val:
-                # Remove trailing noise like "KOTA BEKASI"
-                val = re.split(r'\s+KOTA\s+|\s+KABUPATEN\s+', val)[0]
-                # Fix OCR: "PCLAJARMMAHASISWA" → "PELAJAR/MAHASISWA"
-                val = val.replace('MM', '/M').replace('MMA', '/MA').replace('PC', 'PE')
-                val = val.replace('PCLA', 'PELA')
-                ktp['pekerjaan'] = val.strip().title()
+                # Remove trailing noise
+                val = re.split(r'\s+KOTA\s+|\s+KABUPATEN\s+|\s*<.*$', val)[0]
+                # Fix OCR artifacts
+                val = val.replace('MM', '/M').replace('MMA', '/MA')
+                val = val.replace('PC', 'PE').replace('PCLA', 'PELA')
+                val = re.sub(r'\s+', ' ', val).strip()
+                if len(val) > 2:
+                    ktp['pekerjaan'] = val.title()
             break
     
     # === Kewarganegaraan ===
-    for text, conf in line_texts:
-        upper = text.upper()
+    for line in lines:
+        upper = line.upper()
         if 'KEWARGANEGARAAN' in upper or 'WARGA' in upper:
-            val = extract_after_keyword(text, ['Kewarganegaraan', 'Kewarganegaraan', 'Warga Negara'])
+            val = find_value(line, ['Kewarganegaraan', 'Warga Negara'])
             if val:
                 if 'WNI' in val.upper() or 'INDONESIA' in val.upper():
                     ktp['kewarganegaraan'] = 'WNI'
@@ -317,18 +382,17 @@ def parse_ktp_easyocr(line_texts, raw_results):
             elif 'WNA' in upper:
                 ktp['kewarganegaraan'] = 'WNA'
             break
-    # Fallback
     if not ktp['kewarganegaraan']:
-        for text, conf in line_texts:
-            if 'WNI' in text.upper():
-                ktp['kewarganegaraan'] = 'WNI'
-                break
+        if 'WNI' in full_upper:
+            ktp['kewarganegaraan'] = 'WNI'
+        elif 'WNA' in full_upper:
+            ktp['kewarganegaraan'] = 'WNA'
     
     # === Berlaku Hingga ===
-    for text, conf in line_texts:
-        upper = text.upper()
-        if 'BERLAKU' in upper or 'BORLAKU' in upper or 'HINGGA' in upper:
-            val = extract_after_keyword(text, ['Berlaku Hingga', 'Berlaku', 'Borlaku', 'Hingga'])
+    for line in lines:
+        upper = line.upper()
+        if 'BERLAKU' in upper or 'BERTAKU' in upper or 'BORLAKU' in upper:
+            val = find_value(line, ['Berlaku Hingga', 'Berlaku', 'Bertaku', 'Borlaku'])
             if val:
                 if 'SEUMUR' in val.upper() or 'HIDUP' in val.upper():
                     ktp['berlaku_hingga'] = 'SEUMUR HIDUP'
@@ -337,17 +401,16 @@ def parse_ktp_easyocr(line_texts, raw_results):
             elif 'SEUMUR' in upper:
                 ktp['berlaku_hingga'] = 'SEUMUR HIDUP'
             break
-    # Fallback
     if not ktp['berlaku_hingga']:
-        for text, conf in line_texts:
-            if 'SEUMUR' in text.upper():
-                ktp['berlaku_hingga'] = 'SEUMUR HIDUP'
-                break
+        if 'SEUMUR' in full_upper:
+            ktp['berlaku_hingga'] = 'SEUMUR HIDUP'
     
     return ktp
 
-def parse_kk_easyocr(line_texts, raw_results):
-    full_text = ' '.join([t[0] for t in line_texts])
+def parse_kk(lines):
+    """Parse KK fields"""
+    full_text = ' '.join(lines)
+    full_upper = full_text.upper()
     
     kk = {
         'nomor_kk': '', 'nama_kepala_keluarga': '', 'alamat': '',
@@ -355,68 +418,77 @@ def parse_kk_easyocr(line_texts, raw_results):
         'kabupaten_kota': '', 'provinsi': '', 'kode_pos': ''
     }
     
-    all_digits = re.findall(r'\d{16}', full_text.replace(' ', ''))
-    if all_digits:
-        kk['nomor_kk'] = all_digits[0]
+    # Nomor KK - 16 digits
+    match = re.search(r'\d{16}', full_text.replace(' ', ''))
+    if match:
+        kk['nomor_kk'] = match.group()
     
-    kk['nama_kepala_keluarga'] = ''
-    for text, conf in line_texts:
-        if 'KEPALA' in text.upper():
-            val = extract_after_keyword(text, ['Kepala Keluarga', 'Kepala'])
+    # Nama Kepala Keluarga
+    for line in lines:
+        if 'KEPALA' in line.upper():
+            val = find_value(line, ['Kepala Keluarga', 'Kepala', 'Nama Kepala'])
             if val:
                 kk['nama_kepala_keluarga'] = re.sub(r'[^a-zA-Z\s.]', '', val).strip().title()
             break
     
-    for text, conf in line_texts:
-        if 'ALAMAT' in text.upper():
-            val = extract_after_keyword(text, ['Alamat'])
+    # Alamat
+    for line in lines:
+        if 'ALAMAT' in line.upper():
+            val = find_value(line, ['Alamat'])
             if val:
                 kk['alamat'] = val.title()
             break
     
-    for text, conf in line_texts:
-        match = re.search(r'(\d{3})\s*/\s*(\d{3})', text)
+    # RT/RW
+    for line in lines:
+        match = re.search(r'(\d{3})\s*/\s*(\d{3})', line)
         if match:
             kk['rt_rw'] = f"{match.group(1)}/{match.group(2)}"
             break
     
-    for text, conf in line_texts:
-        if 'KELURAHAN' in text.upper() or 'DESA' in text.upper():
-            val = extract_after_keyword(text, ['Kelurahan', 'Desa', 'Kel/Desa'])
+    # Kelurahan
+    for line in lines:
+        if 'KELURAHAN' in line.upper() or 'DESA' in line.upper():
+            val = find_value(line, ['Kelurahan', 'Desa', 'Kel/Desa'])
             if val:
                 kk['kelurahan_desa'] = re.sub(r'[^a-zA-Z\s]', '', val).strip().title()
             break
     
-    for text, conf in line_texts:
-        if 'KECAMATAN' in text.upper():
-            val = extract_after_keyword(text, ['Kecamatan'])
+    # Kecamatan
+    for line in lines:
+        if 'KECAMATAN' in line.upper():
+            val = find_value(line, ['Kecamatan'])
             if val:
                 kk['kecamatan'] = re.sub(r'[^a-zA-Z\s]', '', val).strip().title()
             break
     
-    for text, conf in line_texts:
-        if 'KABUPATEN' in text.upper() or 'KOTA' in text.upper():
-            val = extract_after_keyword(text, ['Kabupaten', 'Kota'])
+    # Kabupaten/Kota
+    for line in lines:
+        upper = line.upper()
+        if 'KABUPATEN' in upper or 'KOTA' in upper:
+            val = find_value(line, ['Kabupaten', 'Kota'])
             if val:
                 kk['kabupaten_kota'] = val.title()
             break
     
-    for text, conf in line_texts:
-        if 'PROVINSI' in text.upper():
-            val = extract_after_keyword(text, ['Provinsi'])
+    # Provinsi
+    for line in lines:
+        if 'PROVINSI' in line.upper():
+            val = find_value(line, ['Provinsi'])
             if val:
                 kk['provinsi'] = val.title()
             break
     
-    for text, conf in line_texts:
-        if 'KODE' in text.upper() and 'POS' in text.upper():
-            val = extract_after_keyword(text, ['Kode Pos'])
+    # Kode Pos
+    for line in lines:
+        if 'KODE' in line.upper() and 'POS' in line.upper():
+            val = find_value(line, ['Kode Pos'])
             if val:
                 kk['kode_pos'] = val.strip()
             break
     if not kk['kode_pos']:
-        for text, conf in line_texts:
-            match = re.search(r'\b\d{5}\b', text)
+        for line in lines:
+            match = re.search(r'\b\d{5}\b', line)
             if match:
                 kk['kode_pos'] = match.group()
                 break
@@ -443,19 +515,17 @@ def extract():
         tmp_path = tmp.name
     
     try:
-        line_texts, raw_results = extract_text_easyocr(tmp_path)
+        lines = extract_text_multi(tmp_path)
         
         if doc_type == 'kk':
-            parsed = parse_kk_easyocr(line_texts, raw_results)
+            parsed = parse_kk(lines)
         else:
-            parsed = parse_ktp_easyocr(line_texts, raw_results)
-        
-        raw_lines = [text for text, conf in line_texts]
+            parsed = parse_ktp(lines)
         
         return jsonify({
             'success': True,
             'type': doc_type,
-            'raw_text': raw_lines,
+            'raw_text': lines,
             'parsed': parsed
         })
     except Exception as e:
