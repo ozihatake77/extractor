@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="description" content="Scan KTP & KK - Convert foto ke text otomatis">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Extractor">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+    <title>Extractor - Scan KTP & KK</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">📄</span>
+                <h1>Extractor</h1>
+            </div>
+            <p class="subtitle">Scan KTP & KK → Text Otomatis</p>
+        </header>
+
+        <!-- Document Type Selector -->
+        <div class="doc-selector">
+            <button class="doc-btn active" data-type="ktp" id="btn-ktp">
+                <span class="doc-icon">🪪</span>
+                <span>KTP</span>
+            </button>
+            <button class="doc-btn" data-type="kk" id="btn-kk">
+                <span class="doc-icon">👨‍👩‍👧‍👦</span>
+                <span>KK</span>
+            </button>
+        </div>
+
+        <!-- Upload Area -->
+        <div class="upload-area" id="upload-area">
+            <div class="upload-content">
+                <div class="upload-icon">📸</div>
+                <p class="upload-text">Tap untuk upload foto</p>
+                <p class="upload-hint">KTP atau KK</p>
+            </div>
+            <input type="file" id="file-input" accept="image/*" capture="environment" hidden>
+        </div>
+
+        <!-- Preview -->
+        <div class="preview-area" id="preview-area" style="display:none;">
+            <img id="preview-img" src="" alt="Preview">
+            <div class="preview-actions">
+                <button class="btn btn-scan" id="btn-scan">
+                    <span>🔍</span> Scan Sekarang
+                </button>
+                <button class="btn btn-reset" id="btn-reset">
+                    <span>🔄</span> Ulang
+                </button>
+            </div>
+        </div>
+
+        <!-- Loading -->
+        <div class="loading" id="loading" style="display:none;">
+            <div class="spinner"></div>
+            <p>Memproses dokumen...</p>
+            <p class="loading-hint">Tunggu sebentar, OCR sedang bekerja</p>
+        </div>
+
+        <!-- Result -->
+        <div class="result-area" id="result-area" style="display:none;">
+            <div class="result-header">
+                <h2>📋 Hasil Scan</h2>
+                <div class="result-actions">
+                    <button class="btn btn-copy" id="btn-copy" title="Copy JSON">
+                        📋 Copy
+                    </button>
+                    <button class="btn btn-new" id="btn-new">
+                        ➕ Scan Baru
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Parsed Data -->
+            <div class="result-section">
+                <h3>Data Terparse</h3>
+                <div class="data-table" id="parsed-data"></div>
+            </div>
+            
+            <!-- Raw Text -->
+            <div class="result-section">
+                <h3>Teks Mentah (Raw)</h3>
+                <div class="raw-text" id="raw-text"></div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>⚡ Extractor PWA by Yamada</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
