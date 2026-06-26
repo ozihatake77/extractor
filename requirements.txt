@@ -2,9 +2,10 @@ flask==3.1.1
 gunicorn==23.0.0
 Pillow==11.2.1
 pytesseract==0.3.13
-easyocr>=1.7.0
-torch>=2.0.0
-torchvision>=0.15.0
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
 pyzbar>=0.1.9
+# EasyOCR is optional — uncomment for better accuracy (adds ~500MB)
+# easyocr>=1.7.0
+# torch>=2.0.0
+# torchvision>=0.15.0

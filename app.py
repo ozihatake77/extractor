@@ -1456,15 +1456,10 @@ def extract():
                 used_engine = 'qr_code (100%)'
                 lines = [f"QR: {k}={v}" for k, v in qr_data.items() if v]
             
-            # ═══ STRATEGY 2: Multi-engine OCR ═══
+            # ═══ STRATEGY 2: Tesseract (fast, primary) ═══
             if not parsed or not parsed.get('nik'):
-                # Get text from multiple engines
-                if HAS_EASYOCR:
-                    lines = extract_text_easyocr(tmp_path)
-                    used_engine = 'easyocr (AI)'
-                if not lines:
-                    lines = extract_text_multi(tmp_path)
-                    used_engine = 'tesseract'
+                lines = extract_text_multi(tmp_path)
+                used_engine = 'tesseract'
                 
                 # Parse with existing parser
                 parsed_ocr = parse_ktp(lines, img_path=tmp_path)
@@ -1477,35 +1472,41 @@ def extract():
                 
                 parsed = parsed_ocr
             
-            # ═══ STRATEGY 3: Template matching (fill missing fields) ═══
+            # ═══ STRATEGY 3: EasyOCR fallback (only if Tesseract failed) ═══
+            if HAS_EASYOCR and (not parsed.get('nik') or len(re.sub(r'\D', '', parsed.get('nik', ''))) != 16):
+                try:
+                    easyocr_lines = extract_text_easyocr(tmp_path)
+                    if easyocr_lines:
+                        easyocr_parsed = parse_ktp(easyocr_lines, img_path=tmp_path)
+                        # Merge: EasyOCR takes priority for missing/wrong fields
+                        for k, v in easyocr_parsed.items():
+                            if v and (not parsed.get(k) or (k == 'nik' and len(re.sub(r'\D', '', v)) == 16)):
+                                parsed[k] = v
+                        if easyocr_parsed.get('nik'):
+                            used_engine += ' + easyocr'
+                except Exception:
+                    pass
+            
+            # ═══ STRATEGY 4: Template matching (fill missing fields) ═══
             template_fields = extract_fields_by_template(tmp_path)
             for k, v in template_fields.items():
                 if v and not parsed.get(k):
                     parsed[k] = v
-                # Special: tanggal_lahir from template
-                if k == 'tanggal_lahir' and v and not parsed.get('tanggal_lahir'):
-                    parsed['tanggal_lahir'] = v
             
-            # ═══ STRATEGY 4: NIK multi-engine voting ═══
-            nik_multi, nik_valid = extract_nik_multi_engine(tmp_path)
-            if nik_multi:
-                _, current_valid, _ = validate_nik(parsed.get('nik', ''))
-                # Use multi-engine NIK if current is invalid or multi is valid
-                if nik_valid and not current_valid:
+            # ═══ STRATEGY 5: NIK multi-engine voting (last resort) ═══
+            if not parsed.get('nik') or len(re.sub(r'\D', '', parsed.get('nik', ''))) != 16:
+                nik_multi, nik_valid = extract_nik_multi_engine(tmp_path)
+                if nik_multi:
                     parsed['nik'] = nik_multi
-                elif not parsed.get('nik'):
-                    parsed['nik'] = nik_multi
+                    used_engine += ' + nik_voting'
             
             # ═══ NIK VALIDATION & CORRECTION ═══
             if parsed.get('nik'):
-                # Try to correct using province hint
                 province_hint = parsed.get('provinsi', '')
                 corrected = correct_nik_ocr(parsed['nik'], province_hint=province_hint)
                 _, valid, issues = validate_nik(corrected)
                 if valid:
                     parsed['nik'] = corrected
-                    if used_engine and 'validation' not in used_engine:
-                        used_engine += ' + nik_validation'
         
         else:
             # KK processing
